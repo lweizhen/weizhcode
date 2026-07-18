@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 
 from weizhcode.conversation import Conversation
 from weizhcode.models import ChatMessage, ProviderEvent
-from weizhcode.tui import ChatInput, ErrorDialog, MessageView, WeizhCodeApp
+from weizhcode.tui import ChatInput, ErrorDialog, MessageView, STATUS_TEXT, WeizhCodeApp
 
 
 class FakeProvider:
@@ -26,19 +26,30 @@ class FakeProvider:
 
 
 async def test_tui_renders_provider_and_input() -> None:
-    app = WeizhCodeApp(FakeProvider(), Conversation(), provider_name="demo")
+    app = make_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
 
         assert app.provider_name == "demo"
+        assert app.model == "demo-model"
+        assert app.project_path == "D:/demo"
+        assert app.version == "0.1.0"
+        assert app.query_one("#logo")
+        assert app.query_one("#app-title")
+        assert app.query_one("#header-model")
+        assert app.query_one("#header-path")
+        assert app.query_one("#status")
+        assert STATUS_TEXT == "Connected to 0 MCP server(s), 0 tools registered"
+        assert app.query_one("#footer-left")
+        assert app.query_one("#footer-right")
         assert app.query_one(ChatInput)
 
 
 async def test_submit_streams_reply_into_one_message() -> None:
     provider = FakeProvider()
     conversation = Conversation()
-    app = WeizhCodeApp(provider, conversation, provider_name="demo")
+    app = make_app(provider, conversation)
 
     async with app.run_test() as pilot:
         await app.submit_text("你好")
@@ -49,6 +60,8 @@ async def test_submit_streams_reply_into_one_message() -> None:
         assert len(messages) == 2
         assert messages[0].message_content == "你好"
         assert messages[1].message_content == "你好"
+        assert messages[0].display_text == "> 你好"
+        assert messages[1].display_text == "  你好"
         assert [message.role for message in conversation.messages()] == [
             "user",
             "assistant",
@@ -58,7 +71,7 @@ async def test_submit_streams_reply_into_one_message() -> None:
 
 async def test_blank_input_is_ignored() -> None:
     provider = FakeProvider()
-    app = WeizhCodeApp(provider, Conversation(), provider_name="demo")
+    app = make_app(provider)
 
     async with app.run_test() as pilot:
         await app.submit_text("   ")
@@ -76,7 +89,7 @@ async def test_error_event_does_not_add_assistant_history() -> None:
         ]
     )
     conversation = Conversation()
-    app = WeizhCodeApp(provider, conversation, provider_name="demo")
+    app = make_app(provider, conversation)
 
     async with app.run_test() as pilot:
         await app.submit_text("hello")
@@ -86,7 +99,7 @@ async def test_error_event_does_not_add_assistant_history() -> None:
 
 
 async def test_error_dialog_shows_message_text() -> None:
-    app = WeizhCodeApp(FakeProvider(), Conversation(), provider_name="demo")
+    app = make_app()
 
     async with app.run_test() as pilot:
         app.push_screen(ErrorDialog("环境变量 DASHSCOPE_API_KEY 未设置"))
@@ -98,10 +111,24 @@ async def test_error_dialog_shows_message_text() -> None:
 
 
 async def test_exit_commands_close_app() -> None:
-    app = WeizhCodeApp(FakeProvider(), Conversation(), provider_name="demo")
+    app = make_app()
 
     async with app.run_test() as pilot:
         await app.submit_text("/quit")
         await pilot.pause()
 
         assert not app.is_running
+
+
+def make_app(
+    provider: FakeProvider | None = None,
+    conversation: Conversation | None = None,
+) -> WeizhCodeApp:
+    return WeizhCodeApp(
+        provider or FakeProvider(),
+        conversation or Conversation(),
+        provider_name="demo",
+        model="demo-model",
+        project_path="D:/demo",
+        version="0.1.0",
+    )

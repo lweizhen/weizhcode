@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -16,23 +16,46 @@ from weizhcode.models import ProviderEvent
 from weizhcode.providers.base import Provider
 
 
+LOGO = r""" /\_/\ 
+( o.o )
+ > ^ <"""
+STATUS_TEXT = "Connected to 0 MCP server(s), 0 tools registered"
+
+
+@dataclass(frozen=True)
+class UiContext:
+    provider_name: str
+    model: str
+    project_path: str
+    version: str
+
+
 class MessageView(Static):
     def __init__(self, role: str, content: str = "") -> None:
-        super().__init__(self._format(role, content))
+        self.display_text = self._format(role, content)
+        super().__init__(self.display_text)
         self.role = role
         self.message_content = content
 
     def append_text(self, text: str) -> None:
         self.message_content += text
-        self.update(self._format(self.role, self.message_content))
+        self.display_text = self._format(self.role, self.message_content)
+        self.update(self.display_text)
 
     @staticmethod
     def _format(role: str, content: str) -> str:
-        name = "You" if role == "user" else "weizhCode"
-        return f"{name}:\n{content}"
+        if role == "user":
+            return f"> {content}"
+        return f"  {content}"
 
 
 class ChatInput(TextArea):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("placeholder", "› Send a message...")
+        kwargs.setdefault("compact", True)
+        kwargs.setdefault("show_line_numbers", False)
+        super().__init__(*args, **kwargs)
+
     class Submitted(Message):
         def __init__(self, value: str) -> None:
             self.value = value
@@ -105,29 +128,103 @@ class WeizhCodeApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
+        background: #141414;
+        color: #d8d8d8;
     }
 
-    #provider {
-        height: 1;
-        padding: 0 1;
-        background: $boost;
+    #header {
+        height: 4;
+        padding: 0 2 0 2;
+        background: #141414;
+    }
+
+    #logo {
+        width: 10;
+        height: 3;
+        color: #b296ff;
+        text-style: bold;
+    }
+
+    #header-meta {
+        width: 1fr;
+        height: 3;
+        color: #909090;
+    }
+
+    #app-title {
+        color: #d8d8d8;
+        text-style: bold;
+    }
+
+    #header-model {
+        color: #a8a8a8;
+    }
+
+    #header-path {
+        color: #858585;
+    }
+
+    #status {
+        height: 2;
+        padding: 0 3;
+        color: #8a8a8a;
+        background: #141414;
     }
 
     #messages {
         height: 1fr;
-        padding: 1;
+        padding: 0 3 1 3;
+        background: #141414;
     }
 
     MessageView {
         width: 100%;
         margin-bottom: 1;
-        padding: 1;
-        border: solid $primary;
+        padding: 0;
+        border: none;
+        color: #cfcfcf;
+    }
+
+    MessageView.user {
+        color: #d8d8d8;
+    }
+
+    MessageView.assistant {
+        color: #a8a8a8;
     }
 
     ChatInput {
-        height: 7;
-        border: solid $accent;
+        height: 3;
+        margin: 0 3;
+        padding: 0 1;
+        border-top: solid #303030;
+        border-bottom: solid #303030;
+        border-left: none;
+        border-right: none;
+        background: #141414;
+        color: #d8d8d8;
+    }
+
+    ChatInput:focus {
+        border-left: solid #55d6c2;
+    }
+
+    #footer {
+        height: 1;
+        padding: 0 3;
+        background: #141414;
+        color: #777777;
+    }
+
+    #footer-left {
+        width: 1fr;
+        text-align: left;
+    }
+
+    #footer-right {
+        width: 1fr;
+        text-align: right;
+        color: #8e8e8e;
     }
     """
 
@@ -142,18 +239,38 @@ class WeizhCodeApp(App[None]):
         conversation: Conversation,
         *,
         provider_name: str,
+        model: str,
+        project_path: str,
+        version: str,
     ) -> None:
         super().__init__()
         self.provider = provider
         self.conversation = conversation
+        self.ui = UiContext(
+            provider_name=provider_name,
+            model=model,
+            project_path=project_path,
+            version=version,
+        )
         self.provider_name = provider_name
+        self.model = model
+        self.project_path = project_path
+        self.version = version
         self.is_generating = False
 
     def compose(self) -> ComposeResult:
-        yield Static(f"weizhCode · {self.provider_name}", id="provider")
-        with Vertical(id="body"):
-            yield VerticalScroll(id="messages")
-            yield ChatInput(id="input")
+        with Horizontal(id="header"):
+            yield Static(LOGO, id="logo")
+            with Vertical(id="header-meta"):
+                yield Static(f"weizhCode v{self.ui.version}", id="app-title")
+                yield Static(self.ui.model, id="header-model")
+                yield Static(self.ui.project_path, id="header-path")
+        yield Static(STATUS_TEXT, id="status")
+        yield VerticalScroll(id="messages")
+        yield ChatInput(id="input")
+        with Horizontal(id="footer"):
+            yield Static(self.ui.provider_name, id="footer-left")
+            yield Static(self.ui.model, id="footer-right")
 
     def on_mount(self) -> None:
         self.query_one(ChatInput).focus()
@@ -204,6 +321,7 @@ class WeizhCodeApp(App[None]):
 
     async def _append_message(self, role: str, content: str) -> MessageView:
         widget = MessageView(role, content)
+        widget.add_class(role)
         messages = self.query_one("#messages", VerticalScroll)
         await messages.mount(widget)
         await self._scroll_to_end()

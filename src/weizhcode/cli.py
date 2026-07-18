@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from weizhcode import __version__
 from weizhcode.config import load_config, resolve_default_provider
 from weizhcode.conversation import Conversation
 from weizhcode.errors import WeizhCodeError
@@ -21,4 +24,7 @@ def main() -> None:
         provider,
         Conversation(),
         provider_name=provider_config.name,
+        model=provider_config.model,
+        project_path=str(Path.cwd()),
+        version=__version__,
     ).run()
