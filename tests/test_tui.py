@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 
 from weizhcode.conversation import Conversation
 from weizhcode.models import ChatMessage, ProviderEvent
-from weizhcode.tui import ChatInput, MessageView, WeizhCodeApp
+from weizhcode.tui import ChatInput, ErrorDialog, MessageView, WeizhCodeApp
 
 
 class FakeProvider:
@@ -83,6 +83,18 @@ async def test_error_event_does_not_add_assistant_history() -> None:
         await pilot.pause()
 
         assert [message.role for message in conversation.messages()] == ["user"]
+
+
+async def test_error_dialog_shows_message_text() -> None:
+    app = WeizhCodeApp(FakeProvider(), Conversation(), provider_name="demo")
+
+    async with app.run_test() as pilot:
+        app.push_screen(ErrorDialog("环境变量 DASHSCOPE_API_KEY 未设置"))
+        await pilot.pause()
+
+        screen = app.screen_stack[-1]
+        assert isinstance(screen, ErrorDialog)
+        assert "DASHSCOPE_API_KEY" in screen.message
 
 
 async def test_exit_commands_close_app() -> None:

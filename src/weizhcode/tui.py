@@ -4,11 +4,11 @@ from collections.abc import Awaitable, Callable
 
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Grid, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, Static, TextArea
+from textual.widgets import Button, Static, TextArea
 
 from weizhcode.conversation import Conversation
 from weizhcode.errors import redact_secret
@@ -72,7 +72,13 @@ class ErrorDialog(ModalScreen[None]):
     }
 
     #error-message {
+        width: 100%;
+        height: auto;
         margin-bottom: 1;
+    }
+
+    #ok {
+        width: 16;
     }
     """
 
@@ -82,9 +88,9 @@ class ErrorDialog(ModalScreen[None]):
         self.exit_after_ack = exit_after_ack
 
     def compose(self) -> ComposeResult:
-        with Grid(id="error-dialog"):
-            yield Label("出了点问题", id="error-title")
-            yield Label(self.message, id="error-message")
+        with Vertical(id="error-dialog"):
+            yield Static("出了点问题", id="error-title")
+            yield Static(self.message, id="error-message")
             yield Button("确定", id="ok", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
