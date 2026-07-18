@@ -110,6 +110,35 @@ def test_missing_env_var_is_reported_without_secret(tmp_path: Path) -> None:
     assert "${OPENAI_API_KEY}" not in message
 
 
+def test_missing_env_var_for_non_default_provider_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "qwen-key")
+    path = write_config(
+        tmp_path / "weizhcode.yaml",
+        """
+default: qwen-main
+providers:
+  - name: anthropic-main
+    protocol: anthropic
+    model: claude-sonnet-5
+    base_url: https://api.anthropic.com/v1
+    api_key: ${ANTHROPIC_API_KEY}
+    thinking: false
+  - name: qwen-main
+    protocol: qwen
+    model: qwen-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: ${DASHSCOPE_API_KEY}
+    thinking: false
+""",
+    )
+
+    config = load_config(path)
+
+    assert resolve_default_provider(config).api_key == "qwen-key"
+
+
 def test_direct_api_key_is_allowed(tmp_path: Path) -> None:
     config = load_config(
         write_config(

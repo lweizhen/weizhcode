@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -45,8 +46,16 @@ def load_config(path: Path = Path("weizhcode.yaml")) -> AppConfig:
 
     providers = [_parse_provider(item, index) for index, item in enumerate(providers_raw)]
     config = AppConfig(default=default, providers=providers)
-    resolve_default_provider(config)
-    return config
+    default_provider = resolve_default_provider(config)
+    resolved_default = replace(
+        default_provider,
+        api_key=_resolve_api_key(default_provider.api_key),
+    )
+    resolved_providers = [
+        resolved_default if provider.name == resolved_default.name else provider
+        for provider in providers
+    ]
+    return AppConfig(default=default, providers=resolved_providers)
 
 
 def resolve_default_provider(config: AppConfig) -> ProviderConfig:
@@ -74,7 +83,7 @@ def _parse_provider(raw: Any, index: int) -> ProviderConfig:
 
     model = _require_text(raw, "model", index)
     base_url = _require_text(raw, "base_url", index).rstrip("/")
-    api_key = _resolve_api_key(_require_text(raw, "api_key", index))
+    api_key = _require_text(raw, "api_key", index)
 
     thinking = raw.get("thinking")
     if not isinstance(thinking, bool):
@@ -107,4 +116,3 @@ def _resolve_api_key(value: str) -> str:
     if not env_value:
         raise ConfigError(f"环境变量 {env_name} 未设置，无法读取 api_key。")
     return env_value
-
