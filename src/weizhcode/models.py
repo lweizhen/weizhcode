@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -34,6 +35,24 @@ class ToolCall:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "arguments", deepcopy(self.arguments))
+
+
+def parse_tool_arguments(raw: str) -> dict | None:
+    def reject_constant(value):
+        raise ValueError("非法 JSON 常量")
+    try:
+        value = json.loads(raw, parse_constant=reject_constant)
+        return value if isinstance(value, dict) else None
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def wire_calls_valid(calls) -> bool:
+    ids = [call.call_id for call in calls]
+    return (all(isinstance(value, str) and 0 < len(value) <= 512 for value in ids)
+            and len(set(ids)) == len(ids)
+            and all(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", call.name)
+                    and parse_tool_arguments(call.raw_arguments) is not None for call in calls))
 
 
 @dataclass(frozen=True)

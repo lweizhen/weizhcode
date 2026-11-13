@@ -77,6 +77,7 @@ async def test_anthropic_provider_maps_text_delta_and_request() -> None:
 
     async def fake_stream(*args, **kwargs) -> AsyncIterator[SSEEvent]:
         calls.append((args, kwargs))
+        yield SSEEvent(None, json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}))
         yield SSEEvent(
             event="content_block_delta",
             data=json.dumps(
@@ -86,6 +87,9 @@ async def test_anthropic_provider_maps_text_delta_and_request() -> None:
                 }
             ),
         )
+        yield SSEEvent(None, json.dumps({"type": "content_block_stop", "index": 0}))
+        yield SSEEvent(None, json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}))
+        yield SSEEvent(None, json.dumps({"type": "message_stop"}))
 
     provider = AnthropicProvider(provider_config("anthropic"), fake_stream)
     events = [
@@ -113,6 +117,7 @@ async def test_openai_provider_maps_response_delta_and_request() -> None:
             event="response.output_text.delta",
             data=json.dumps({"type": "response.output_text.delta", "delta": "hi"}),
         )
+        yield SSEEvent(None, json.dumps({"type": "response.completed", "response": {"status": "completed", "output": []}}))
 
     provider = OpenAIProvider(provider_config("openai"), fake_stream)
     events = [
@@ -140,6 +145,7 @@ async def test_qwen_provider_maps_chat_completion_delta_and_request() -> None:
             event=None,
             data=json.dumps({"choices": [{"delta": {"content": "你好"}}]}),
         )
+        yield SSEEvent(None, json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}))
         yield SSEEvent(event=None, data="[DONE]")
 
     provider = QwenProvider(provider_config("qwen"), fake_stream)

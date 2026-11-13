@@ -18,7 +18,7 @@ class FakeProvider:
         self.calls: list[list[ChatMessage]] = []
 
     async def stream_chat(
-        self, messages: list[ChatMessage]
+        self, messages: list[ChatMessage], **kwargs
     ) -> AsyncIterator[ProviderEvent]:
         self.calls.append(messages)
         for event in self.events:
