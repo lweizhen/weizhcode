@@ -13,6 +13,8 @@ from weizhcode.tools.base import BaseTool, TEXT, ToolFailure, schema
 from weizhcode.tools.file_utils import original_path
 from weizhcode.tools.limits import CHUNK_SIZE, MAX_RESULT_CHARS
 
+output_collected = None
+
 
 def shell_argv(command: str, shell: str) -> list[str]:
     if os.name == "nt":
@@ -67,7 +69,7 @@ class RunCommandTool(BaseTool):
             nonlocal retained, truncated
             decoder = codecs.getincrementaldecoder("utf-8")("replace")
             try:
-                while raw := pipe.read(CHUNK_SIZE):
+                while raw := pipe.read1(CHUNK_SIZE):
                     text = decoder.decode(raw)
                     keep(label, text)
                 keep(label, decoder.decode(b"", final=True))
@@ -84,6 +86,8 @@ class RunCommandTool(BaseTool):
                 chunks[label].append(text[:remaining]) if remaining else None
                 retained += min(remaining, len(text))
                 truncated |= len(text) > remaining
+                if output_collected and remaining and text:
+                    output_collected(label, text[:remaining])
 
         threads = [threading.Thread(target=read_pipe, args=(label, pipe), daemon=True)
                    for label, pipe in (("stdout", process.stdout), ("stderr", process.stderr))]
