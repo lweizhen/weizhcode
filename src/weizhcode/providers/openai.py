@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from weizhcode.errors import ProviderError, StreamError, redact_secret
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
-from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, diagnostic_text, make_call
+from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, diagnostic_text, make_call, safe_arguments
 from weizhcode.providers.sse import SSEEvent, stream_sse
 from weizhcode.redaction import Redactor
 
@@ -112,7 +112,7 @@ class OpenAIProvider:
 def _safe_item(item, safe):
     item = deepcopy(item)
     if item.get("type") == "function_call":
-        item["arguments"] = safe.text(item.get("arguments", ""))
+        item["arguments"] = safe_arguments(item.get("arguments", ""), safe)
     elif item.get("type") == "message":
         for block in item.get("content", []):
             for key in ("text", "refusal"):
@@ -141,7 +141,7 @@ def _input_payload(messages, safe=None):
             if message.content:
                 result.append({"role": message.role, "content": safe.text(message.content)})
             result.extend({"type": "function_call", "call_id": c.call_id, "name": c.name,
-                           "arguments": safe.text(c.raw_arguments)} for c in message.tool_calls)
+                           "arguments": safe_arguments(c.raw_arguments, safe)} for c in message.tool_calls)
     return result
 
 

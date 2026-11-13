@@ -6,7 +6,7 @@
 
 ## 执行记录
 
-最近验证：2026-11-13，Windows，Python 3.13.5；原基线 27 passed，依赖加入后仍 27 passed，基础组完成后全量 66 passed。
+最近验证：2026-11-13，Windows，Python 3.13.5；全量 225 passed、2 skipped（33.93s），compileall 退出码 0；uv sync --locked 通过。原始基线 27 passed 保留。
 
 | 任务 | 状态 | 证据/说明 |
 |------|------|-----------|
@@ -58,24 +58,24 @@
 | T46 | 通过 | 协议/历史 37 passed；单轮协调 17 passed，含三协议真实读取工作进程集成 |
 | T47 | 通过 | 协议/历史 37 passed；单轮协调 17 passed，含三协议真实读取工作进程集成 |
 | T48 | 通过 | 协议/历史 37 passed；单轮协调 17 passed，含三协议真实读取工作进程集成 |
-| T49 | 未开始 | 尚未执行 |
-| T50 | 未开始 | 尚未执行 |
-| T51 | 未开始 | 尚未执行 |
-| T52 | 未开始 | 尚未执行 |
-| T53 | 未开始 | 尚未执行 |
-| T54 | 未开始 | 尚未执行 |
-| T55 | 未开始 | 尚未执行 |
-| T56 | 未开始 | 尚未执行 |
-| T57 | 未开始 | 尚未执行 |
-| T58 | 未开始 | 尚未执行 |
-| T59 | 未开始 | 尚未执行 |
-| T60 | 未开始 | 尚未执行 |
-| T61 | 未开始 | 尚未执行 |
-| T62 | 未开始 | 尚未执行 |
-| T63 | 未开始 | 尚未执行 |
-| T64 | 未开始 | 尚未执行 |
-| T65 | 未开始 | 尚未执行 |
-| T66 | 未开始 | 尚未执行 |
+| T49 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T50 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T51 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T52 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T53 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T54 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T55 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T56 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T57 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T58 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
+| T59 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
+| T60 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
+| T61 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
+| T62 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
+| T63 | 未执行（缺凭证） | anthropic-main 无可用凭证；不改配置/模型 |
+| T64 | 未执行（缺凭证） | openai-main 无可用凭证；未以其他协议替代 |
+| T65 | 通过（真实 API） | qwen3.7-plus 读取成功、FILE_NOT_FOUND 解释、追问 731；线上冒烟退出码 0 |
+| T66 | 证据已汇总，阶段验收未全部完成 | checklist 区分自动、真实 API、真实终端待验及平台限制 |
 
 ## 执行约束
 
@@ -1283,4 +1283,13 @@
 - 覆盖 Plan 的全部文件、Spec 的 F1～F16、N1～N8 与 AC1～AC13。
 - 本次仅生成 task 并记录 Plan 已获批准，不提前修改实现、安装依赖、运行本任务清单或生成 checklist。
 - 用户批准 task 后进入 checklist 验收设计；checklist 也获批准后才开始实施。
+
+## 本轮交付与剩余验收（2026-11-13）
+
+- T36～T57 的会话、协议、固定单工具闭环、界面审批与接线已实现。新增测试文件按职责拆为 test_provider_tools.py、test_protocol_integration.py、test_tool_tui.py、test_cli.py，原有测试保留。
+- 最终命令：uv sync --locked；uv run python -m pytest -q --tb=short（225 passed、2 skipped，33.93s）；uv run python -m compileall -q src tests（退出码 0）。
+- 线上仅复用已有默认千问配置，未改用户配置、端点或模型。tests/manual_tool_smoke.py 是手动运行入口，不被 pytest 自动触发，不打印凭证。
+- 两个 skip：Windows 目录链接样本创建权限不足；当前系统非 POSIX，原生进程组用例跳过。
+- PowerShell 真实界面仍待用户手测；Anthropic、OpenAI 真实 API 缺凭证；强制终止写入中临时资源清理的独立样本仍待补验。不能据此声明整阶段全部验收通过。
+- 仅本地分组提交，未推送 GitHub。工具进程管理不是沙箱；终止不是回滚。
 

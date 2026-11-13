@@ -202,3 +202,26 @@ def test_edit_execute_stale_and_empty_original(tmp_path):
     assert tool.prepare(direct, ToolContext(tmp_path)).error.error_code == "INVALID_ARGUMENTS"
     assert path.read_bytes() == b"changed"
 
+
+
+@pytest.mark.parametrize("raw,expected", [(b"bad\0file", "BINARY_FILE"), (b"bad\xff", "UNSUPPORTED_ENCODING")])
+def test_read_file_rejects_binary_and_encoding(tmp_path, raw, expected):
+    (tmp_path / "a").write_bytes(raw)
+    tool = ReadFileTool()
+    result = tool.execute(prepare(tool, tmp_path, path="a"), ToolContext(tmp_path))
+    assert result.error_code == expected
+    assert (tmp_path / "a").read_bytes() == raw
+
+
+def test_read_file_permission_failure_structured(tmp_path, monkeypatch):
+    (tmp_path / "a").write_text("unchanged", encoding="utf-8")
+    tool = ReadFileTool()
+    operation = prepare(tool, tmp_path, path="a")
+    original = Path.open
+    def denied(self, *args, **kwargs):
+        if self == tmp_path / "a":
+            raise PermissionError(13, "Permission denied")
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", denied)
+    assert tool.execute(operation, ToolContext(tmp_path)).error_code == "IO_ERROR"
+

@@ -310,3 +310,31 @@ async def test_worker_protocol_wrong_operation_id_no_write(tmp_path):
         await worker.aclose()
     assert not (tmp_path / "a").exists()
 
+
+
+@pytest.mark.parametrize("name", ["read_file", "run_command"])
+async def test_security_pipeline_actual_content_and_command_preserved(tmp_path, name):
+    from weizhcode.redaction import Redactor
+    from test_command_tool import python_command
+    secret = "fake-secret-token"
+    marker = tmp_path / "marker"
+    if name == "read_file":
+        marker.write_text(secret, encoding="utf-8")
+        call = tool_call(name, path=str(marker))
+    else:
+        code = f"import sys; from pathlib import Path; Path({str(marker)!r}).write_text({secret!r}); print({secret!r}); print({secret!r},file=sys.stderr)"
+        call = tool_call(name, command=python_command(code))
+    executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), Redactor([secret]))
+    previews = []
+    async def approve(request):
+        previews.append(request)
+        assert secret not in request.preview + request.command
+        return True
+    events = await collect(executor, call, approve)
+    result = events[-1].result
+    assert not result.is_error
+    assert secret not in result.to_model_text()
+    assert "[redacted]" in result.content
+    assert marker.read_text(encoding="utf-8") == secret
+    assert bool(previews) == (name == "run_command")
+

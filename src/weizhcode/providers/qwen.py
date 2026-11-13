@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable
 
 from weizhcode.errors import ProviderError, StreamError, redact_secret
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
-from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, diagnostic_text, make_call
+from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, diagnostic_text, make_call, safe_arguments
 from weizhcode.providers.sse import SSEEvent, stream_sse
 from weizhcode.redaction import Redactor
 
@@ -109,7 +109,7 @@ def _messages_payload(messages, safe=None):
             item = {"role": message.role, "content": safe.text(message.content)}
             if message.tool_calls:
                 item["tool_calls"] = [{"id": c.call_id, "type": "function",
-                    "function": {"name": c.name, "arguments": safe.text(c.raw_arguments)}}
+                    "function": {"name": c.name, "arguments": safe_arguments(c.raw_arguments, safe)}}
                     for c in message.tool_calls]
             result.append(item)
     return result

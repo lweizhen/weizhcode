@@ -96,12 +96,24 @@ def test_find_files_glob_root_and_recursive(tree):
     assert "ignored" not in result.content and ".hidden.py" not in result.content
 
 
-def test_find_files_empty_and_cap(tmp_path):
+def test_find_files_empty_and_cap(tmp_path, monkeypatch):
     assert not run(FindFilesTool(), tmp_path, pattern="**/*.py").is_error
     for i in range(205):
         (tmp_path / f"{i}.py").touch()
+    # 此处专测条数上限；字符预算另行验证，避免临时绝对路径长度影响断言。
+    monkeypatch.setattr("weizhcode.tools.find_files.MAX_RESULT_CHARS", 100000)
     result = run(FindFilesTool(), tmp_path, pattern="**/*.py")
     assert result.metadata["count"] == 200 and result.truncated
+    assert len(result.to_model_text()) <= 20000
+
+
+def test_find_files_character_budget(tmp_path, monkeypatch):
+    for i in range(20):
+        (tmp_path / f"{i}.py").touch()
+    monkeypatch.setattr("weizhcode.tools.find_files.MAX_RESULT_CHARS", 1024)
+    result = run(FindFilesTool(), tmp_path, pattern="**/*.py")
+    assert 0 < result.metadata["count"] < 20
+    assert result.truncated and "[truncated]" in result.content
     assert len(result.to_model_text()) <= 20000
 
 

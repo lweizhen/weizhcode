@@ -24,6 +24,12 @@ def make_call(call_id, name, raw_arguments) -> ToolCall:
                     name if isinstance(name, str) else "", raw_arguments, arguments)
 
 
+def safe_arguments(raw, redactor):
+    value = parse_tool_arguments(raw)
+    return (json.dumps(redactor.value(value), ensure_ascii=False) if value is not None
+            else redactor.text(raw))
+
+
 def diagnostic_text(message: ChatMessage) -> str:
     if message.role == "tool":
         data = [json.loads(result.to_model_text()) for result in message.tool_results]

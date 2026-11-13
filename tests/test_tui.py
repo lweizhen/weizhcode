@@ -40,7 +40,7 @@ async def test_tui_renders_provider_and_input() -> None:
         assert app.query_one("#header-model")
         assert app.query_one("#header-path")
         assert app.query_one("#status")
-        assert STATUS_TEXT == "Connected to 0 MCP server(s), 0 tools registered"
+        assert STATUS_TEXT == "Connected to 0 MCP server(s), 6 tools registered"
         assert app.query_one("#footer-left")
         assert app.query_one("#footer-right")
         assert app.query_one(ChatInput)

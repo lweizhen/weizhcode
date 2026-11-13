@@ -11,6 +11,7 @@ from weizhcode.providers.openai import OpenAIProvider
 from weizhcode.providers.qwen import QwenProvider
 from weizhcode.providers.sse import SSEEvent
 from weizhcode.tools import create_default_registry
+from weizhcode.redaction import Redactor
 
 
 def tool_events(protocol, raw='{"path":"中文.txt"}', *, count=1):
@@ -176,3 +177,42 @@ def test_history_nan_is_diagnostic():
     conv = Conversation()
     conv.add_tool_exchange(ChatMessage("assistant", tool_calls=(call,)), [ToolResult.failure(call, "INVALID_JSON", "bad")])
     assert conv.messages()[0].provider_payload["diagnostic"]
+
+
+
+def test_security_pipeline_encoded_arguments_redacted():
+    from weizhcode.providers.qwen import _messages_payload
+    from weizhcode.providers.openai import _input_payload
+    from weizhcode.models import ToolCall
+    raw = '{"content":"secret\\u002dtoken"}'
+    call = ToolCall("id", "write_file", raw)
+    message = ChatMessage("assistant", tool_calls=(call,))
+    for encode in (_messages_payload, _input_payload):
+        output = json.dumps(encode([message], Redactor(["secret-token"])))
+        assert "redacted" in output
+        assert "secret" not in output
+    assert call.raw_arguments == raw
+
+
+
+@pytest.mark.parametrize("protocol", ["anthropic", "openai", "qwen"])
+async def test_interleaved_tool_streams_share_no_buffers(protocol):
+    events = tool_events(protocol, count=2)
+    if protocol == "anthropic":
+        first, second, ending = events[:5], events[5:10], events[10:]
+        events = [first[0], second[0], first[1], second[1], first[2], second[2],
+                  first[3], second[3], first[4], second[4]] + ending
+    elif protocol == "openai":
+        first, second, ending = events[:6], events[6:12], events[12:]
+        events = [item for pair in zip(first, second) for item in pair] + ending
+    else:
+        events = [events[0], events[2], events[1], events[3]] + events[4:]
+        events[0]["choices"][0]["delta"]["reasoning_content"] = "private thinking"
+    result = [e async for e in make_provider(protocol, events).stream_chat([])]
+    assert result[-1].type == "done"
+    calls = result[-1].assistant_message.tool_calls
+    assert [c.call_id for c in calls] == ["call0", "call1"]
+    assert all(c.arguments == {"path": "中文.txt"} for c in calls)
+    starts = [e.tool_call.local_id for e in result if e.type == "tool_call_start"]
+    assert starts == [c.local_id for c in calls]
+    assert not any("private thinking" in e.text for e in result)

@@ -31,7 +31,10 @@ def load_config(path: Path = Path("weizhcode.yaml")) -> AppConfig:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        raise ConfigError(f"配置文件不是合法 YAML：{exc}") from exc
+        # 解析器的原始错误会引用配置行，可能包含明文密钥。
+        mark = getattr(exc, "problem_mark", None)
+        position = f"（第 {mark.line + 1} 行）" if mark else ""
+        raise ConfigError(f"配置文件不是合法 YAML{position}，请检查缩进与引号。") from exc
 
     if not isinstance(raw, dict):
         raise ConfigError("配置文件顶层必须是对象，包含 default 和 providers。")
