@@ -6,7 +6,7 @@
 
 ## 执行记录
 
-最近验证：2026-11-13，Windows，Python 3.13.5；全量 225 passed、2 skipped（33.93s），compileall 退出码 0；uv sync --locked 通过。原始基线 27 passed 保留。
+最近验证：2026-11-13，Windows，Python 3.13.5；全量 226 passed、2 skipped（57.29s），compileall 退出码 0；uv sync --locked 通过。原始基线 27 passed 保留。
 
 | 任务 | 状态 | 证据/说明 |
 |------|------|-----------|
@@ -58,15 +58,15 @@
 | T46 | 通过 | 协议/历史 37 passed；单轮协调 17 passed，含三协议真实读取工作进程集成 |
 | T47 | 通过 | 协议/历史 37 passed；单轮协调 17 passed，含三协议真实读取工作进程集成 |
 | T48 | 通过 | 协议/历史 37 passed；单轮协调 17 passed，含三协议真实读取工作进程集成 |
-| T49 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T50 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T51 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T52 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T53 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T54 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T55 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T56 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
-| T57 | 通过 | 全量 225 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T49 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T50 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T51 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T52 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T53 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T54 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T55 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T56 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
+| T57 | 通过 | 全量 226 passed、2 skipped；Pilot、真实工作进程、跨协议集成均有自动断言 |
 | T58 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
 | T59 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
 | T60 | 待用户手测 | 当前桌面控制规则禁止代操作终端；无界面测试未冒充真实 PowerShell 验收 |
@@ -1287,9 +1287,9 @@
 ## 本轮交付与剩余验收（2026-11-13）
 
 - T36～T57 的会话、协议、固定单工具闭环、界面审批与接线已实现。新增测试文件按职责拆为 test_provider_tools.py、test_protocol_integration.py、test_tool_tui.py、test_cli.py，原有测试保留。
-- 最终命令：uv sync --locked；uv run python -m pytest -q --tb=short（225 passed、2 skipped，33.93s）；uv run python -m compileall -q src tests（退出码 0）。
+- 最终命令：uv sync --locked；uv run python -m pytest -q --tb=short（226 passed、2 skipped，57.29s）；uv run python -m compileall -q src tests（退出码 0）。
 - 线上仅复用已有默认千问配置，未改用户配置、端点或模型。tests/manual_tool_smoke.py 是手动运行入口，不被 pytest 自动触发，不打印凭证。
 - 两个 skip：Windows 目录链接样本创建权限不足；当前系统非 POSIX，原生进程组用例跳过。
-- PowerShell 真实界面仍待用户手测；Anthropic、OpenAI 真实 API 缺凭证；强制终止写入中临时资源清理的独立样本仍待补验。不能据此声明整阶段全部验收通过。
+- PowerShell 真实界面仍待用户手测；Anthropic、OpenAI 真实 API 缺凭证；强制终止写入中的临时资源清理现已通过真实工作进程超时样本验证。不能据此声明整阶段全部验收通过。
 - 仅本地分组提交，未推送 GitHub。工具进程管理不是沙箱；终止不是回滚。
 

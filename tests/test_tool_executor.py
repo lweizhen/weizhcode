@@ -338,3 +338,40 @@ async def test_security_pipeline_actual_content_and_command_preserved(tmp_path, 
     assert marker.read_text(encoding="utf-8") == secret
     assert bool(previews) == (name == "run_command")
 
+
+
+async def test_atomic_temp_cleanup_after_real_worker_timeout(tmp_path, monkeypatch):
+    target = tmp_path / "a"
+    target.write_text("original", encoding="utf-8")
+    user_temp = tmp_path / ".weizhcode-user.tmp"
+    user_temp.write_text("keep", encoding="utf-8")
+    original_spawn = asyncio.create_subprocess_exec
+    # 只在测试子进程中暂停资源登记之后的写入；不更改生产执行路径。
+    bootstrap = (
+        "import time; from weizhcode.tools import worker; original = worker.emit\n"
+        "def paused(message):\n"
+        "    original(message)\n"
+        "    if message.get('type') == 'resource': time.sleep(60)\n"
+        "worker.emit = paused\n"
+        "worker.main()\n"
+    )
+    async def spawn(*args, **kwargs):
+        if len(args) >= 3 and args[1:3] == ("-m", "weizhcode.tools.worker"):
+            args = (args[0], "-c", bootstrap, *args[3:])
+        return await original_spawn(*args, **kwargs)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    workers = []
+    def factory():
+        worker = ManagedWorker()
+        workers.append(worker)
+        return worker
+    executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), timeout=3, worker_factory=factory)
+    events = await collect(executor, tool_call("write_file", path="a", content="new"), allow)
+    assert events[-1].result.error_code == "TOOL_TIMEOUT"
+    worker = workers[0]
+    assert worker.resources, "实际工作进程未登记临时资源，不能当作该场景已覆盖"
+    assert worker.process.returncode is not None
+    assert all(not path.exists() for path in worker.resources)
+    assert target.read_text(encoding="utf-8") == "original"
+    assert user_temp.read_text(encoding="utf-8") == "keep"
+
