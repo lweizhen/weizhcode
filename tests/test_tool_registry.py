@@ -79,3 +79,12 @@ def test_registry_disallows_schema_references():
         definition = ToolDefinition("ref", "测试", {"$ref": "https://example.test/schema"})
     with pytest.raises(ValueError, match="引用"):
         ToolRegistry().register(Referencing())
+
+
+def test_default_registry_six_order_and_permissions():
+    from weizhcode.tools import create_default_registry
+    registry = create_default_registry()
+    definitions = registry.definitions()
+    assert [d.name for d in definitions] == ["read_file", "write_file", "edit_file", "run_command", "find_files", "search_content"]
+    assert {d.name for d in definitions if d.requires_confirmation} == {"write_file", "edit_file", "run_command"}
+    assert all(registry.get(d.name) is not None for d in definitions)
