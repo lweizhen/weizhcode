@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "A terminal AI chat assistant prototype."
 requires-python = ">=3.11"
 dependencies = [
+    "jsonschema>=4.25.0",
+    "pathspec>=0.12.1",
+    "wcmatch>=10.0",
     "httpx>=0.28.0",
     "pyyaml>=6.0.0",
     "textual>=6.6.0",

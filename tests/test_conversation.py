@@ -26,3 +26,14 @@ def test_messages_returns_copy() -> None:
 
     assert len(conversation.messages()) == 1
 
+
+def test_event_contract_tool_message_data() -> None:
+    from weizhcode.models import ChatMessage, ToolCall, ToolResult
+    call = ToolCall("id", "read_file", '{}')
+    payload = {"items": [{"type": "reasoning"}]}
+    message = ChatMessage("assistant", tool_calls=(call,), provider_payload=payload)
+    payload["items"].clear()
+    assert message.tool_calls[0].call_id == "id"
+    assert message.provider_payload["items"]
+    assert ChatMessage("tool", tool_results=(ToolResult("id", "read_file"),)).role == "tool"
+

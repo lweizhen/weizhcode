@@ -19,13 +19,9 @@ class StreamError(ProviderError):
 
 def redact_secret(text: str, secret: str | None = None) -> str:
     """Remove obvious secret values from text before showing it to users."""
-    redacted = text
-    if secret:
-        redacted = redacted.replace(secret, "[redacted]")
-    for marker in ("sk-", "sk_"):
-        if marker in redacted:
-            prefix, _, suffix = redacted.partition(marker)
-            tail = suffix.split()[0] if suffix else ""
-            redacted = redacted.replace(f"{marker}{tail}", "[redacted]")
-    return redacted
+    import re
+    from weizhcode.redaction import Redactor
+
+    redacted = Redactor((secret,)).text(text)
+    return re.sub(r"sk[-_][^\s\"'<>]+", "[redacted]", redacted)
 

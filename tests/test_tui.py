@@ -132,3 +132,13 @@ def make_app(
         project_path="D:/demo",
         version="0.1.0",
     )
+
+
+def test_event_contract_pending_is_not_done():
+    from weizhcode.models import ToolCall, TurnEvent
+    call = ToolCall("id", "read_file", '{}')
+    pending = ProviderEvent("tool_call_start", tool_call=call)
+    complete_call = ProviderEvent("tool_call", tool_call=call)
+    assert pending.type != "done"
+    assert complete_call.assistant_message is None
+    assert TurnEvent("text_delta", text="x", phase="final").phase == "final"
