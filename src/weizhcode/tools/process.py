@@ -74,8 +74,12 @@ class WindowsJob:
     def close(self):
         handle, self.handle = getattr(self, "handle", None), None
         if handle:
-            self.api.TerminateJobObject(handle, 1)
-            self.api.CloseHandle(handle)
+            try:
+                if not self.api.TerminateJobObject(handle, 1):
+                    raise ctypes.WinError(ctypes.get_last_error() or 1)
+            finally:
+                if not self.api.CloseHandle(handle):
+                    raise ctypes.WinError(ctypes.get_last_error() or 1)
 
 
 class ManagedWorker:

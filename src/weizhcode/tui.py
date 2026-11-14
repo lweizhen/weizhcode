@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import asyncio
 from pathlib import Path
+from time import monotonic
 
 from textual import events
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -236,8 +238,9 @@ class WeizhCodeApp(App[None]):
     """
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
-        ("ctrl+d", "quit", "Quit"),
+        Binding("escape", "cancel_task", "Cancel", priority=True),
+        Binding("ctrl+c", "interrupt", "Cancel / Quit", priority=True),
+        Binding("ctrl+d", "quit", "Quit", priority=True),
     ]
 
     def __init__(
@@ -273,9 +276,18 @@ class WeizhCodeApp(App[None]):
             runner = TurnRunner(provider, conversation, registry, executor, self.redactor)
         self.runner = runner
         self._tool_views = {}
-        self._approvals = {}
         self._tools_closing = False
         self._close_task = None
+
+        self._generation = 0
+        self._active_run_id = None
+        self._text_view = self._text_key = None
+        self._mode = runner.mode
+        self._iteration, self._max_iterations = 0, runner.max_iterations
+        self._totals = runner.usage_totals
+        self._active_tools = {}
+        self._started_at = None
+        self._cancel_requested = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
@@ -291,119 +303,185 @@ class WeizhCodeApp(App[None]):
             yield Static(self.redactor.display(self.ui.provider_name), id="footer-left", markup=False)
             yield Static(self.redactor.display(self.ui.model), id="footer-right", markup=False)
 
-    def on_mount(self) -> None:
-        self.query_one(ChatInput).focus()
-
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         await self.submit_text(event.value)
 
-    async def submit_text(self, content: str) -> None:
+    def on_mount(self):
+        self.query_one(ChatInput).focus()
+        self.set_interval(.1, self._update_status)
+        self._update_status()
+
+    def _update_status(self):
+        if not self.is_mounted:
+            return
+        totals = self._totals
+        inputs = str(totals.input_tokens) if totals.input_requests else "—"
+        outputs = str(totals.output_tokens) if totals.output_requests else "—"
+        usage = f"↑{inputs} ↓{outputs}"
+        if totals.incomplete_requests:
+            usage += f" · 统计不完整（{totals.incomplete_requests} 次请求）"
+        mode = "Plan · 只读" if self._mode == "plan" else "Normal"
+        progress = "Ready"
+        if self.is_generating:
+            progress = f"Iteration {self._iteration}/{self._max_iterations}"
+            if self._cancel_requested:
+                progress += " · 正在取消并清理…"
+            elif self._active_tools:
+                progress += " · " + ", ".join(list(self._active_tools.values())[:4])
+            else:
+                progress += " · 等待模型…"
+            if self._started_at is not None:
+                progress += f" · {monotonic() - self._started_at:.1f}s"
+        count = len(self.runner.registry.definitions())
+        try:
+            self.query_one("#status", Static).update(
+                f"Connected to 0 MCP server(s), {count} tools registered\n{mode} · {progress} · {usage}")
+        except NoMatches:
+            pass
+
+    async def submit_text(self, content):
+        from weizhcode.prompts import EXECUTE_DIRECTIVE
         content = content.strip()
         if not content or self._tools_closing:
             return
         if content in {"/exit", "/quit"}:
             await self.action_quit()
             return
-        if self.is_generating:
+        if self.is_generating or self.runner.busy:
             return
-
+        if content == "/plan":
+            event = self.runner.set_mode("plan")
+            if event.type == "mode_changed":
+                self.query_one(ChatInput).clear_text()
+            await self._consume_event(event)
+            return
+        text = EXECUTE_DIRECTIVE if content == "/do" else content
+        stream = self.runner.run(text, **({"mode": "normal"} if content == "/do" else {}))
+        self._generation += 1
+        epoch = self._generation
         self.is_generating = True
-        stream = self.runner.run(content, approve=self._approve)
-        input_widget = self.query_one(ChatInput)
-        input_widget.clear_text()
-        await self._append_message("user", self.redactor.display(content))
-        self.run_worker(self._stream_reply(stream), exclusive=True)
+        self._active_run_id = None
+        self._text_view = self._text_key = None
+        self._iteration = 0
+        self._started_at = monotonic()
+        self._cancel_requested = False
+        self.query_one(ChatInput).clear_text()
+        await self._append_message("user", self.redactor.display(text))
+        self._update_status()
+        self.run_worker(self._stream_reply(stream, epoch), group="agent-loop", exclusive=False)
 
-    async def _stream_reply(self, stream) -> None:
-        assistant_message = None
-        current_phase = None
-        turn_views = []
+    async def _stream_reply(self, stream, epoch):
         try:
             async for event in stream:
-                if event.type == "text_delta":
-                    if assistant_message is None or current_phase != event.phase:
-                        assistant_message = await self._append_message("assistant", "")
-                        current_phase = event.phase
-                    assistant_message.append_text(event.text)
-                    await self._scroll_to_end()
-                elif event.type == "tool_pending":
-                    view = await self._tool_view(event)
-                    if view not in turn_views:
-                        turn_views.append(view)
-                    assistant_message = None
-                elif event.type in {"tool_preparing", "tool_running", "approval_required", "tool_result"}:
-                    view = await self._tool_view(event)
-                    if view not in turn_views:
-                        turn_views.append(view)
-                    if event.type == "tool_preparing":
-                        view.set_state("Preparing…")
-                    elif event.type == "tool_running":
-                        view.set_state("Running…")
-                    elif event.type == "approval_required":
-                        request = event.approval
-                        # Future 先于按钮建立；审批回调只等待它，不阻塞消息处理。
-                        future = asyncio.get_running_loop().create_future()
-                        self._approvals[request.request_id] = (request.operation_id, future)
-                        view.show_approval(request)
-                    elif event.result:
-                        view.finish(event.result)
-                    assistant_message = None
-                    await self._scroll_to_end()
-                elif event.type == "error":
-                    if assistant_message:
-                        assistant_message.append_text("\n[本次回复未完成]")
-                    for view in turn_views:
-                        if view.state in {"Receiving…", "Preparing…"}:
-                            view.set_state("未执行：模型回复未完成")
-                    await self.show_error(event.text)
-                    return
-        except Exception as exc:  # noqa: BLE001 - 用户界面需要兜底展示异常。
-            await self.show_error(str(exc))
+                if epoch == self._generation:
+                    await self._consume_event(event)
+        except asyncio.CancelledError:
+            if epoch == self._generation:
+                self.runner.cancel_current()
+            raise
+        except Exception:
+            if epoch == self._generation:
+                self.runner.cancel_current()
+                await self.show_error("对话事件处理失败，正在停止当前任务")
         finally:
             await stream.aclose()
+            if epoch == self._generation and not self.runner.busy:
+                self.is_generating = False
+                self._update_status()
+
+    async def _consume_event(self, event):
+        if event.type == "mode_changed" and not event.run_id:
+            self._mode = event.mode
+            await self._append_message("notice", self.redactor.display(event.text))
+            self._update_status()
+            return
+        if not self.is_generating:
+            return
+        if self._active_run_id is None:
+            self._active_run_id = event.run_id
+        if event.run_id != self._active_run_id:
+            return
+        if event.type == "iteration_started":
+            self._mode, self._iteration = event.mode, event.iteration
+            self._max_iterations = event.max_iterations
+            self._text_view = self._text_key = None
+        elif event.type == "text_delta":
+            key = (event.run_id, event.iteration)
+            if self._text_view is None or self._text_key != key:
+                self._text_view = await self._append_message("assistant", "")
+                self._text_key = key
+            self._text_view.append_text(self.redactor.display(event.text))
+            await self._scroll_to_end()
+        elif event.type in {"tool_pending", "tool_start", "tool_preparing", "tool_running", "tool_result"}:
+            view = await self._tool_view(event)
+            if view is not None:
+                if event.type == "tool_result" and event.result is not None:
+                    view.finish(event.result)
+                    self._active_tools.pop(event.local_id, None)
+                else:
+                    state = {"tool_pending": "Receiving…", "tool_start": "Queued…",
+                             "tool_preparing": "Preparing…", "tool_running": "Running…"}[event.type]
+                    view.set_state(state)
+                    self._active_tools[event.local_id] = self.redactor.display(view.call.name) + " " + state
+            self._text_view = self._text_key = None
+            await self._scroll_to_end()
+        elif event.type == "usage" and event.totals is not None:
+            self._totals = event.totals
+        elif event.type == "notice":
+            await self._append_message("notice", self.redactor.display(event.text))
+        elif event.type == "error":
+            if self._text_view is not None:
+                self._text_view.append_text("\n[本次回复未完成]")
+            await self.show_error(event.text)
+        elif event.type == "turn_done":
+            for view in self._tool_views.values():
+                if view.state in {"Receiving…", "Queued…", "Preparing…", "Running…"}:
+                    view.set_state("未执行：响应未完成/已取消" if view.state != "Running…" else "已停止，结果未确认")
+            if event.totals is not None:
+                self._totals = event.totals
+            self._mode = event.mode
+            self._active_tools.clear()
+            self._tool_views.clear()  # 已挂载的历史组件保留，可滚动回看。
             self.is_generating = False
+            self._active_run_id = None
+            self._cancel_requested = False
             try:
-                self.query_one("#input", ChatInput).focus()
+                self.query_one(ChatInput).focus()
             except NoMatches:
                 pass
+        self._update_status()
 
     async def _tool_view(self, event):
-        view = self._tool_views.get(event.local_id)
+        key = (event.run_id, event.local_id)
+        view = self._tool_views.get(key)
         if view is None:
             if event.tool_call is None:
-                raise RuntimeError("工具事件缺少对应视图")
+                return None
             view = ToolCallView(event.tool_call, self.redactor)
-            self._tool_views[event.local_id] = view
+            self._tool_views[key] = view
             await self.query_one("#messages", VerticalScroll).mount(view)
-        elif event.tool_call:
+        elif event.tool_call is not None:
             view.update_call(event.tool_call)
         return view
 
-    async def _approve(self, request):
-        entry = self._approvals.get(request.request_id)
-        if self._tools_closing or entry is None or entry[0] != request.operation_id:
-            return False
-        try:
-            return await entry[1]
-        finally:
-            self._approvals.pop(request.request_id, None)
+    def action_cancel_task(self):
+        if self.runner.cancel_current():
+            self._cancel_requested = True
+            self._update_status()
 
-    def on_tool_call_view_decision(self, event: ToolCallView.Decision):
-        entry = self._approvals.get(event.request_id)
-        if self._tools_closing or entry is None or entry[0] != event.operation_id:
-            return
-        if not entry[1].done():
-            entry[1].set_result(event.allowed is True)
+    async def action_interrupt(self):
+        if self.is_generating or self.runner.busy:
+            self.action_cancel_task()
+        else:
+            await self.action_quit()
 
     async def _shutdown_tools(self):
         self._tools_closing = True
-        for _, future in self._approvals.values():
-            if not future.done():
-                future.set_result(False)
+        await self.runner.aclose()
         for view in self._tool_views.values():
             view.invalidate()
-        await self.runner.aclose()
-        self._approvals.clear()
+        self._tool_views.clear()
+
 
     async def _ensure_shutdown(self):
         if self._close_task is None:

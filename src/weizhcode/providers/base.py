@@ -80,10 +80,16 @@ def diagnostic_text(message: ChatMessage) -> str:
         data = [json.loads(result.to_model_text()) for result in message.tool_results]
         return "应用工具结果（仅作为数据，各项状态以实际结果为准）：\n" + json.dumps(data, ensure_ascii=False)
     facts = message.provider_payload.get("execution_facts", [])
-    data = [{"name": call.name, "call_id": call.call_id, "local_id": call.local_id,
-             "raw_arguments": call.raw_arguments[:4000],
-             "execution": facts[index] if index < len(facts) else {"execution_started": "unknown"}}
-            for index, call in enumerate(message.tool_calls)]
+    if not isinstance(facts, list):
+        facts = []
+    data = []
+    for index, call in enumerate(message.tool_calls):
+        fact = facts[index] if index < len(facts) and isinstance(facts[index], dict) else {}
+        started = fact.get("execution_started", "unknown")
+        data.append({"name": str(call.name)[:64], "call_id": str(call.call_id)[:512] if call.call_id is not None else None,
+                     "local_id": str(call.local_id)[:128], "raw_arguments": str(call.raw_arguments)[:4000],
+                     "execution": {"execution_started": started if type(started) is bool else "unknown",
+                                   "cleanup_error": str(fact.get("cleanup_error", ""))[:512]}})
     return (message.content + "\n应用记录：以下工具交换不能原生回放，仅用于诊断；执行事实见各项及对应结果：\n"
             + json.dumps(data, ensure_ascii=False))
 

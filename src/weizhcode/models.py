@@ -62,7 +62,6 @@ class ToolDefinition:
     name: str
     description: str
     parameters: dict[str, object]
-    requires_confirmation: bool = False
     read_only: bool = False
 
     def __post_init__(self) -> None:
@@ -200,19 +199,6 @@ class PreparedOperationPreview:
 
 
 @dataclass(frozen=True)
-class ApprovalRequest:
-    request_id: str
-    operation_id: str
-    local_id: str
-    tool_name: str
-    target: str
-    preview: str
-    command: str = ""
-    cwd: str = ""
-    preview_truncated: bool = False
-
-
-@dataclass(frozen=True)
 class ProviderConfig:
     name: str
     protocol: ProtocolName
@@ -256,10 +242,8 @@ class ProviderEvent:
 class TurnEvent:
     type: str
     text: str = ""
-    phase: Literal["initial", "final"] = "initial"
     local_id: str = ""
     tool_call: ToolCall | None = None
-    approval: ApprovalRequest | None = None
     result: ToolResult | None = None
     run_id: str = ""
     request_id: str = ""

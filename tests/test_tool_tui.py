@@ -37,59 +37,206 @@ async def wait_for(pilot, predicate):
     assert predicate(), "界面状态未在时限内完成"
 
 
-@pytest.mark.parametrize("allowed", [False, True])
-async def test_approval_ui_write_and_decision_binding(tmp_path, allowed):
+def loop_app_for(tmp_path, replies, *, provider=None, secrets=()):
+    from weizhcode.turn_runner import TurnRunner
+    from weizhcode.tui import WeizhCodeApp
+    registry, conv, safe = create_default_registry(), Conversation(), Redactor(secrets)
+    provider = provider or FakeProvider(replies)
+    runner = TurnRunner(provider, conv, registry, ToolExecutor(registry, ToolContext(tmp_path), safe), safe)
+    return WeizhCodeApp(provider, conv, provider_name="test", model="test-model",
+                             project_path=str(tmp_path), version="0.1.0", runner=runner, redactor=safe)
+
+
+async def test_loop_tool_view_cancelled_and_bounded_without_buttons(tmp_path):
+    from weizhcode.tool_ui import ToolCallView
+    app = loop_app_for(tmp_path, [reply("ok")], secrets=["secret-token"])
+    async with app.run_test() as pilot:
+        view = ToolCallView(ToolCall("a", "read_file", '{"path":"a"}'), app.redactor)
+        await app.query_one("#messages", VerticalScroll).mount(view)
+        view.finish(ToolResult("a", "read_file", "secret-token\n" + "x\n" * 100, "cancelled", "TOOL_CANCELLED"))
+        assert view.state.startswith("已取消") and "failed" in view.classes
+        assert not list(view.query(Button))
+        assert len(view.summary) <= 1000 and len(view.summary.splitlines()) <= 8
+        assert "secret-token" not in view.summary
+
+
+async def test_loop_event_ui_only_event_consumer_and_order(tmp_path):
+    from weizhcode.models import TurnEvent, UsageTotals
+    from weizhcode.tool_ui import ToolCallView
+    from weizhcode.tui import WeizhCodeApp
+    call = ToolCall("a", "read_file", '{"path":"a"}')
+    class EventsRunner:
+        registry, mode, max_iterations, usage_totals = create_default_registry(), "normal", 25, UsageTotals()
+        busy = False
+        def run(self, text, **kwargs):
+            self.busy = True
+            async def events():
+                for kind, extra in [
+                    ("iteration_started", {}), ("text_delta", {"text": "before"}),
+                    ("tool_start", {"tool_call": call, "local_id": call.local_id}),
+                    ("tool_running", {"local_id": call.local_id}),
+                    ("tool_result", {"tool_call": call, "local_id": call.local_id,
+                                     "result": ToolResult("a", "read_file", "result")}),
+                    ("text_delta", {"text": "final"}), ("turn_done", {"reason": "completed"})]:
+                    yield TurnEvent(kind, run_id="fake-run", iteration=1, **extra)
+                self.busy = False
+            return events()
+        def cancel_current(self):
+            return False
+        async def aclose(self):
+            self.busy = False
+    conv = Conversation()
+    app = WeizhCodeApp(object(), conv, provider_name="test", model="model",
+                            project_path=str(tmp_path), version="test", runner=EventsRunner())
+    async with app.run_test() as pilot:
+        await app.submit_text("hello")
+        await wait_for(pilot, lambda: not app.is_generating)
+        children = list(app.query_one("#messages", VerticalScroll).children)
+        assert [type(c) for c in children] == [MessageView, MessageView, ToolCallView, MessageView]
+        assert children[1].message_content == "before" and children[-1].message_content == "final"
+        assert conv.messages() == []  # 界面不写模型历史、不执行工具。
+        assert not app._tool_views
+
+
+async def test_loop_mode_usage_ui_snapshots_and_do(tmp_path):
+    from weizhcode.models import TokenUsage
+    usage = ProviderEvent("usage", usage=TokenUsage(10, 2, True, "test"))
+    app = loop_app_for(tmp_path, [[usage, usage, *reply("plan")], reply("executed")])
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.submit_text("/plan")
+        assert not app.provider.requests and app.runner.mode == "plan"
+        await app.submit_text("plan task")
+        await wait_for(pilot, lambda: not app.is_generating)
+        status = str(app.query_one("#status", Static).render())
+        assert "Plan" in status and "↑10 ↓2" in status and "6 tools" in status
+        await app.submit_text("/do")
+        await wait_for(pilot, lambda: not app.is_generating)
+        assert app.runner.mode == "normal" and len(app.provider.requests) == 2
+        assert app.provider.requests[-1][0][-1].content == "请按上面的计划开始执行。"
+        assert "统计不完整" in str(app.query_one("#status", Static).render())
+
+
+@pytest.mark.parametrize("key", ["escape", "ctrl+c"])
+async def test_loop_cancel_keys_focused_input_recovers_without_exit(tmp_path, key):
+    entered = asyncio.Event()
+    class WaitingProvider(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            if not self.requests:
+                self.requests.append((messages, kwargs))
+                entered.set()
+                await asyncio.Event().wait()
+            else:
+                async for e in super().stream_chat(messages, **kwargs):
+                    yield e
+    provider = WaitingProvider([reply("recovered")])
+    app = loop_app_for(tmp_path, [], provider=provider)
+    async with app.run_test() as pilot:
+        await app.submit_text("wait")
+        await asyncio.wait_for(entered.wait(), 2)
+        app.query_one(ChatInput).focus()
+        await pilot.press(key)
+        await wait_for(pilot, lambda: not app.is_generating)
+        assert not app._tools_closing and not app.runner.executor._closed
+        await app.submit_text("next")
+        await wait_for(pilot, lambda: not app.is_generating)
+        assert app.conversation.messages()[-1].content == "recovered"
+        await pilot.press("escape")
+        assert not app._tools_closing
+
+
+async def test_loop_ui_race_isolation_busy_draft_and_late_ids(tmp_path):
+    from weizhcode.models import TurnEvent
+    entered = asyncio.Event()
+    class WaitingProvider(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            self.requests.append((messages, kwargs))
+            entered.set()
+            await asyncio.Event().wait()
+            yield ProviderEvent("done")
+    provider = WaitingProvider([])
+    app = loop_app_for(tmp_path, [], provider=provider)
+    async with app.run_test() as pilot:
+        await app.submit_text("wait")
+        await entered.wait()
+        app.query_one(ChatInput).text = "保留草稿"
+        for content in ("/plan", "/do", "duplicate"):
+            await app.submit_text(content)
+        assert app.query_one(ChatInput).text == "保留草稿"
+        assert len(provider.requests) == 1 and app.runner.mode == "normal"
+        await app._consume_event(TurnEvent("text_delta", text="wrong", run_id="old", iteration=1))
+        await app._consume_event(TurnEvent("turn_done", run_id="old"))
+        assert app.is_generating
+        assert not any(v.message_content == "wrong" for v in app.query(MessageView))
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: not app.is_generating)
+        assert app.query_one(ChatInput).text == "保留草稿"
+
+
+async def test_loop_cancel_keys_idle_ctrl_c_quits(tmp_path):
+    app = loop_app_for(tmp_path, [])
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+c")
+    assert app._tools_closing and app.runner.executor._closed
+
+
+async def test_loop_ui_race_isolation_old_consumer_error_does_not_cancel_new(tmp_path):
+    app = loop_app_for(tmp_path, [])
+    class BrokenOldStream:
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            raise RuntimeError("old consumer failed")
+        async def aclose(self):
+            pass
+    cancelled = []
+    app.runner.cancel_current = lambda: cancelled.append(True)
+    app._generation = 2
+    await app._stream_reply(BrokenOldStream(), 1)
+    assert not cancelled
+
+
+@pytest.mark.parametrize("mode", ["normal", "plan"])
+async def test_loop_production_path_write_mode_gate_no_buttons(tmp_path, mode):
     target = tmp_path / "new" / "a.txt"
     call = ToolCall("id", "write_file", json.dumps({"path": str(target), "content": "secret-token"}))
     app = app_for(tmp_path, [reply("准备", (call,)), reply("最终")], secrets=["secret-token"])
+    if mode == "plan":
+        app.runner.set_mode("plan")
     async with app.run_test(size=(100, 40)) as pilot:
         await app.submit_text("写文件")
-        await wait_for(pilot, lambda: bool(app._approvals))
-        view = next(iter(app.query(ToolCallView)))
-        assert view.state == "等待确认（默认拒绝）"
-        assert app.focused.id == "deny"
-        assert not target.parent.exists()
-        assert "secret-token" not in str(view.query_one(".tool-preview", Static).render())
-        request = view.request
-        # 过期或错误操作标识不能释放当前审批。
-        app.on_tool_call_view_decision(ToolCallView.Decision(request.request_id, "wrong", True))
-        assert not next(iter(app._approvals.values()))[1].done()
-        app.query_one(ChatInput).text = "保留草稿"
-        await app.submit_text("第二条不应发送")
-        assert len(app.provider.requests) == 1
-        await pilot.click(view.query_one("#allow" if allowed else "#deny", Button))
         await wait_for(pilot, lambda: not app.is_generating)
-        assert len(app.provider.requests) == 2
-        assert target.exists() == allowed
-        if allowed:
+        view = next(iter(app.query(ToolCallView)))
+        assert not list(view.query(Button))
+        assert target.exists() is (mode == "normal")
+        if mode == "normal":
             assert target.read_text(encoding="utf-8") == "secret-token"
         else:
             assert not target.parent.exists()
-        assert app.query_one(ChatInput).text == "保留草稿"
         result = app.conversation.messages()[2].tool_results[0]
-        assert result.status == ("success" if allowed else "denied")
-        assert not app._approvals
-        assert all(b.disabled for b in view.query(Button))
-        assert len(app.query(ToolCallView)) == 1
+        assert result.error_code == (None if mode == "normal" else "TOOL_NOT_ALLOWED")
+        assert "secret-token" not in view.state + view.title()
         children = list(app.query_one("#messages", VerticalScroll).children)
         assert [type(c) for c in children] == [MessageView, MessageView, ToolCallView, MessageView]
         assert children[-1].message_content == "最终"
 
 
-async def test_approval_ui_stale_write_no_overwrite(tmp_path):
+async def test_loop_production_path_stale_write_no_overwrite(tmp_path):
+    from weizhcode.tools.process import ManagedWorker
     target = tmp_path / "a.txt"
     target.write_text("old", encoding="utf-8")
     call = ToolCall("id", "write_file", json.dumps({"path": str(target), "content": "new"}))
     app = app_for(tmp_path, [reply("", (call,)), reply("文件已变化")])
+    class ChangedWorker(ManagedWorker):
+        async def prepare(self, call):
+            preview = await super().prepare(call)
+            target.write_text("user update", encoding="utf-8")
+            return preview
+    app.runner.executor.worker_factory = ChangedWorker
     async with app.run_test(size=(100, 40)) as pilot:
         await app.submit_text("写")
-        await wait_for(pilot, lambda: bool(app._approvals))
-        target.write_text("user update", encoding="utf-8")
-        view = next(iter(app.query(ToolCallView)))
-        await pilot.click(view.query_one("#allow", Button))
         await wait_for(pilot, lambda: not app.is_generating)
         assert target.read_text(encoding="utf-8") == "user update"
-        assert "failed" in view.classes
+        assert "failed" in next(iter(app.query(ToolCallView))).classes
         assert app.conversation.messages()[2].tool_results[0].error_code == "PREVIEW_STALE"
 
 
@@ -129,28 +276,33 @@ async def test_tui_recovery_split_secret_markup_and_model_failure(tmp_path):
         texts = "".join(m.message_content for m in app.query(MessageView))
         assert "secret-token" not in texts and "\x1b" not in texts
         assert "[bold]" in texts and "未完成" in texts
-        assert [m.role for m in app.conversation.messages()] == ["user"]
+        assert [m.role for m in app.conversation.messages()] == ["user", "assistant"]
+        assert app.conversation.messages()[-1].provider_payload["source"] == "application"
         await pilot.click("#ok")
         await app.submit_text("next")
         await wait_for(pilot, lambda: not app.is_generating)
         assert list(app.query(MessageView))[-1].message_content == "ok"
 
 
-async def test_app_shutdown_invalidates_pending_approval(tmp_path):
-    target = tmp_path / "never.txt"
+async def test_app_shutdown_prepared_write_before_execute(tmp_path):
+    from weizhcode.tools.process import ManagedWorker
+    target, entered = tmp_path / "never.txt", asyncio.Event()
     call = ToolCall("id", "write_file", json.dumps({"path": str(target), "content": "never"}))
     app = app_for(tmp_path, [reply("", (call,)), reply("must not request")])
+    class WaitingPrepare(ManagedWorker):
+        async def prepare(self, call):
+            preview = await super().prepare(call)
+            entered.set()
+            await asyncio.Event().wait()
+            return preview
+    app.runner.executor.worker_factory = WaitingPrepare
     async with app.run_test(size=(100, 40)) as pilot:
         await app.submit_text("write")
-        await wait_for(pilot, lambda: bool(app._approvals))
-        pending = next(iter(app._approvals.values()))[1]
+        await asyncio.wait_for(entered.wait(), 5)
         await app.submit_text("/exit")
         await pilot.pause()
-        assert not app.is_running
-        assert pending.done()
-        assert not app._approvals and not target.exists()
-        assert len(app.provider.requests) == 1
-        assert not app.runner.executor._active
+        assert not app.is_running and not target.exists()
+        assert len(app.provider.requests) == 1 and not app.runner.executor._active
 
 
 async def test_turn_event_ui_immediate_double_submit(tmp_path):
@@ -172,11 +324,9 @@ async def test_app_shutdown_running_command_ui(tmp_path):
     app = app_for(tmp_path, [reply("", (call,)), reply("must not request")])
     async with app.run_test(size=(100, 40)) as pilot:
         await app.submit_text("run")
-        await wait_for(pilot, lambda: bool(app._approvals))
+        await wait_for(pilot, lambda: any(v.state == "Running…" for v in app.query(ToolCallView)))
         view = next(iter(app.query(ToolCallView)))
-        assert command in str(view.query_one(".tool-preview", Static).render())
-        await pilot.click(view.query_one("#allow", Button))
-        await wait_for(pilot, lambda: view.state == "Running…")
+        assert "run_command" in view.title()
         await app.action_quit()
         await pilot.pause()
         assert not app.is_running and not app.runner.executor._active
@@ -205,6 +355,7 @@ async def test_app_shutdown_final_stream_ui(tmp_path):
                 finally:
                     closed.set()
     app.provider = app.runner.provider = WaitingProvider()
+    app.runner.collector.provider = app.provider
     async with app.run_test() as pilot:
         await app.submit_text("read")
         await wait_for(pilot, started.is_set)
@@ -212,4 +363,5 @@ async def test_app_shutdown_final_stream_ui(tmp_path):
         await pilot.pause()
         assert closed.is_set()
         assert len(app.provider.requests) == 2
-        assert [m.role for m in app.conversation.messages()] == ["user", "assistant", "tool"]
+        assert [m.role for m in app.conversation.messages()] == ["user", "assistant", "tool", "assistant"]
+        assert app.conversation.messages()[-1].provider_payload["source"] == "application"

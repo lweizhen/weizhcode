@@ -58,12 +58,11 @@ def tool_call(name, **args):
     return ToolCall("call-id", name, json.dumps(args))
 
 
-async def collect(executor, call, approve=None):
-    return [event async for event in executor.run(call, approve=approve)]
-
-
-async def allow(request):
-    return True
+async def collect(executor, call, *, mode="normal"):
+    from weizhcode.models import TurnEvent
+    result, slot, events = await execute_slot(executor, call, mode=mode)
+    events.append(TurnEvent("tool_result", local_id=slot.local_id, result=result))
+    return events
 
 
 async def execute_slot(executor, call, *, mode="normal", cancel=None):
@@ -185,6 +184,35 @@ async def test_cleanup_infrastructure_failure_retains_success(tmp_path):
     assert result.content == "confirmed"
     assert "PROCESS_CONTROL_FAILED" in slot.cleanup_error
     assert "secret cleanup details" not in slot.cleanup_error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job 返回值原生分支")
+def test_cleanup_infrastructure_failure_windows_job_api_return_checked():
+    closed = []
+    class Api:
+        def TerminateJobObject(self, handle, code):
+            return False
+        def CloseHandle(self, handle):
+            closed.append(handle)
+            return True
+    job = WindowsJob.__new__(WindowsJob)
+    job.api, job.handle = Api(), 123
+    with pytest.raises(OSError):
+        job.close()
+    assert closed == [123] and job.handle is None
+
+
+async def test_loop_production_path_cancel_reuse_and_plan_gate(tmp_path):
+    (tmp_path / "a").write_text("hello")
+    executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
+    cancelled = asyncio.Event()
+    cancelled.set()
+    result, slot, _ = await execute_slot(executor, tool_call("write_file", path="b", content="x"), cancel=cancelled)
+    assert result.status == "cancelled" and not slot.execution_started and not (tmp_path / "b").exists()
+    result, _, _ = await execute_slot(executor, tool_call("read_file", path="a"))
+    assert result.status == "success" and not executor._closed
+    result, _, _ = await execute_slot(executor, tool_call("write_file", path="b", content="x"), mode="plan")
+    assert result.error_code == "TOOL_NOT_ALLOWED" and not (tmp_path / "b").exists()
 
 
 async def test_loop_process_cleanup_cancel_preparing_and_creation(tmp_path, monkeypatch):
@@ -359,7 +387,7 @@ async def test_windows_job_assignment_failure_prevents_execution(tmp_path, monke
         raise OSError("denied")
     monkeypatch.setattr(WindowsJob, "attach", deny)
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
-    events = await collect(executor, tool_call("write_file", path="a", content="x"), allow)
+    events = await collect(executor, tool_call("write_file", path="a", content="x"))
     assert events[-1].result.error_code == "PROCESS_CONTROL_FAILED"
     assert not (tmp_path / "a").exists()
 
@@ -382,47 +410,47 @@ async def test_executor_validation_does_not_start_worker(tmp_path, call):
 ])
 async def test_executor_readonly_no_approval(tmp_path, name, args):
     (tmp_path / "a").write_text("hello")
-    async def reject_approval(request):
-        raise AssertionError("只读工具请求了审批")
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
-    events = await collect(executor, tool_call(name, **args), reject_approval)
+    events = await collect(executor, tool_call(name, **args))
     assert [e.type for e in events] == ["tool_preparing", "tool_running", "tool_result"]
     assert not events[-1].result.is_error
     assert not executor._active
 
 
-@pytest.mark.parametrize("approved", [True, False, None])
-async def test_executor_approval_no_early_write(tmp_path, approved):
-    executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
-    async def decide(request):
-        assert not (tmp_path / "sub").exists()
-        assert request.command == ""
-        assert str(tmp_path / "sub/a") in request.preview
-        return approved
-    events = await collect(executor, tool_call("write_file", path="sub/a", content="hello"), decide)
+@pytest.mark.parametrize("mode", ["normal", "plan"])
+async def test_executor_no_early_write_and_plan_gate(tmp_path, mode):
+    class CheckedWorker(ManagedWorker):
+        async def prepare(self, call):
+            preview = await super().prepare(call)
+            assert not (tmp_path / "sub").exists()
+            return preview
+    executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), worker_factory=CheckedWorker)
+    events = await collect(executor, tool_call("write_file", path="sub/a", content="hello"), mode=mode)
     result = events[-1].result
-    assert (tmp_path / "sub/a").exists() is (approved is True)
-    assert result.status == ("success" if approved is True else "denied")
+    assert (tmp_path / "sub/a").exists() is (mode == "normal")
+    assert result.status == ("success" if mode == "normal" else "error")
     assert not list(tmp_path.rglob(".weizhcode-*.tmp"))
 
 
-async def test_executor_approval_stale_after_wait(tmp_path):
+async def test_executor_stale_after_prepare_does_not_overwrite(tmp_path):
     path = tmp_path / "a"
     path.write_text("old")
-    executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
-    async def decide(request):
-        path.write_text("external")
-        return True
-    events = await collect(executor, tool_call("write_file", path="a", content="new"), decide)
+    class ChangedWorker(ManagedWorker):
+        async def prepare(self, call):
+            preview = await super().prepare(call)
+            path.write_text("external")
+            return preview
+    executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), worker_factory=ChangedWorker)
+    events = await collect(executor, tool_call("write_file", path="a", content="new"))
     assert events[-1].result.error_code == "PREVIEW_STALE"
     assert path.read_text() == "external"
 
 
-async def test_executor_approval_missing_handler_denies(tmp_path):
+async def test_executor_normal_write_needs_no_handler(tmp_path):
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
     events = await collect(executor, tool_call("write_file", path="a", content="new"))
-    assert events[-1].result.status == "denied"
-    assert not (tmp_path / "a").exists()
+    assert events[-1].result.status == "success"
+    assert (tmp_path / "a").read_text() == "new"
 
 
 class SlowWorker:
@@ -442,13 +470,10 @@ class SlowWorker:
         self.closed = True
 
 
-async def test_executor_timeout_approval_pauses_budget(tmp_path):
+async def test_executor_timeout_total_budget_success(tmp_path):
     worker = SlowWorker()
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), timeout=.15, worker_factory=lambda: worker)
-    async def decide(request):
-        await asyncio.sleep(.25)
-        return True
-    events = await collect(executor, tool_call("write_file", path="a", content="new"), decide)
+    events = await collect(executor, tool_call("write_file", path="a", content="new"))
     assert events[-1].result.status == "success" and worker.closed
 
 
@@ -490,7 +515,7 @@ async def test_process_tree_timeout_kills_parent_and_child(tmp_path):
               'pathlib.Path("pids.json").write_text(json.dumps([os.getpid(),child.pid])); '
               'print("ready",flush=True); time.sleep(60)')
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), timeout=3)
-    events = await collect(executor, tool_call("run_command", command=python_command(script)), allow)
+    events = await collect(executor, tool_call("run_command", command=python_command(script)))
     assert events[-1].result.status == "timeout"
     assert (tmp_path / "pids.json").exists(), events[-1].result
     ids = json.loads((tmp_path / "pids.json").read_text())
@@ -502,7 +527,7 @@ async def test_output_pressure_real_worker(tmp_path):
     from test_command_tool import python_command
     script = 'import sys; print("x"*200000); print("y"*200000,file=sys.stderr)'
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), timeout=10)
-    events = await collect(executor, tool_call("run_command", command=python_command(script)), allow)
+    events = await collect(executor, tool_call("run_command", command=python_command(script)))
     result = events[-1].result
     assert not result.is_error, result
     assert result.truncated and len(result.to_model_text()) <= 20000
@@ -514,7 +539,7 @@ async def test_output_pressure_real_worker(tmp_path):
 async def test_app_shutdown_executor_active_worker(tmp_path):
     from test_command_tool import python_command
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
-    task = asyncio.create_task(collect(executor, tool_call("run_command", command=python_command("import time; time.sleep(60)")), allow))
+    task = asyncio.create_task(collect(executor, tool_call("run_command", command=python_command("import time; time.sleep(60)"))))
     for _ in range(100):
         if executor._active:
             break
@@ -534,7 +559,7 @@ async def test_app_shutdown_during_subprocess_start(tmp_path, monkeypatch):
         return process
     monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed)
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
-    task = asyncio.create_task(collect(executor, tool_call("write_file", path="a", content="x"), allow))
+    task = asyncio.create_task(collect(executor, tool_call("write_file", path="a", content="x")))
     for _ in range(200):
         if created:
             break
@@ -574,18 +599,13 @@ async def test_security_pipeline_actual_content_and_command_preserved(tmp_path, 
         code = f"import sys; from pathlib import Path; Path({str(marker)!r}).write_text({secret!r}); print({secret!r}); print({secret!r},file=sys.stderr)"
         call = tool_call(name, command=python_command(code))
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), Redactor([secret]))
-    previews = []
-    async def approve(request):
-        previews.append(request)
-        assert secret not in request.preview + request.command
-        return True
-    events = await collect(executor, call, approve)
+    events = await collect(executor, call)
     result = events[-1].result
     assert not result.is_error
     assert secret not in result.to_model_text()
     assert "[redacted]" in result.content
     assert marker.read_text(encoding="utf-8") == secret
-    assert bool(previews) == (name == "run_command")
+    assert all(secret not in str(event) for event in events)
 
 
 
@@ -615,7 +635,7 @@ async def test_atomic_temp_cleanup_after_real_worker_timeout(tmp_path, monkeypat
         workers.append(worker)
         return worker
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), timeout=3, worker_factory=factory)
-    events = await collect(executor, tool_call("write_file", path="a", content="new"), allow)
+    events = await collect(executor, tool_call("write_file", path="a", content="new"))
     assert events[-1].result.error_code == "TOOL_TIMEOUT"
     worker = workers[0]
     assert worker.resources, "实际工作进程未登记临时资源，不能当作该场景已覆盖"

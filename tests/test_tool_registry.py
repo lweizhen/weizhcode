@@ -110,5 +110,5 @@ def test_default_registry_six_order_and_permissions():
     registry = create_default_registry()
     definitions = registry.definitions()
     assert [d.name for d in definitions] == ["read_file", "write_file", "edit_file", "run_command", "find_files", "search_content"]
-    assert {d.name for d in definitions if d.requires_confirmation} == {"write_file", "edit_file", "run_command"}
+    assert {d.name for d in definitions if d.read_only is False} == {"write_file", "edit_file", "run_command"}
     assert all(registry.get(d.name) is not None for d in definitions)

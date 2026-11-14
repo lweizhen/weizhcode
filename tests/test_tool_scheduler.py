@@ -99,6 +99,26 @@ async def test_readonly_concurrency_limit_and_cancel_waiters():
     assert not context.slots[4].execution_started and not context.owned_tasks
 
 
+async def test_readonly_concurrency_limit_wait_time_excluded_from_tool_budget(tmp_path):
+    from weizhcode.models import ToolContext
+    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import LoopWorker
+    workers = []
+    def factory():
+        worker = LoopWorker(prepare_delay=.12)
+        workers.append(worker)
+        return worker
+    registry = create_default_registry()
+    executor = ToolExecutor(registry, ToolContext(tmp_path), timeout=.2, worker_factory=factory)
+    context, events = RunContext(), []
+    async def emit(event):
+        events.append(event)
+    results = await ToolScheduler(registry, executor).execute(
+        ChatMessage("assistant", tool_calls=tuple(call(i) for i in range(6))), context=context, emit=emit)
+    assert len(workers) == 6 and all(w.closed for w in workers)
+    assert all(r.status == "success" for r in results)
+
+
 async def test_side_effect_batch_barriers_actual_visibility(tmp_path):
     marker = tmp_path / "marker"
     def side_effect(slot):

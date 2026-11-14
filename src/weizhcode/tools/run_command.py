@@ -31,8 +31,8 @@ def shell_argv(command: str, shell: str) -> list[str]:
 
 
 class RunCommandTool(BaseTool):
-    definition = ToolDefinition("run_command", "在指定目录运行一次非交互命令，须用户批准；不保留 cd 和环境修改。",
-                                schema({"command": TEXT, "cwd": TEXT}, ["command"]), requires_confirmation=True, read_only=False)
+    definition = ToolDefinition("run_command", "在指定目录运行一次非交互命令；不保留 cd 和环境修改。",
+                                schema({"command": TEXT, "cwd": TEXT}, ["command"]), read_only=False)
 
     def _prepare(self, call, context):
         args = dict(call.arguments or {})

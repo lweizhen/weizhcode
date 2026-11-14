@@ -28,7 +28,7 @@ class FakeProvider:
             ProviderEvent(type="start"),
             ProviderEvent(type="text_delta", text="你"),
             ProviderEvent(type="text_delta", text="好"),
-            ProviderEvent(type="done"),
+            ProviderEvent(type="done", assistant_message=ChatMessage("assistant", "你好")),
         ]
         self.calls: list[list[ChatMessage]] = []
 
@@ -110,7 +110,8 @@ async def test_error_event_does_not_add_assistant_history() -> None:
         await app.submit_text("hello")
         await pilot.pause()
 
-        assert [message.role for message in conversation.messages()] == ["user"]
+        assert [message.role for message in conversation.messages()] == ["user", "assistant"]
+        assert conversation.messages()[-1].provider_payload["source"] == "application"
 
 
 async def test_error_dialog_shows_message_text() -> None:
@@ -156,4 +157,4 @@ def test_event_contract_pending_is_not_done():
     complete_call = ProviderEvent("tool_call", tool_call=call)
     assert pending.type != "done"
     assert complete_call.assistant_message is None
-    assert TurnEvent("text_delta", text="x", phase="final").phase == "final"
+    assert TurnEvent("text_delta", text="x", iteration=2).iteration == 2

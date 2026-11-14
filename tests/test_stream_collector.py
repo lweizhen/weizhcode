@@ -144,6 +144,50 @@ async def test_collector_cancellation_closes_real_provider_source(protocol):
     assert closed.is_set() and not context.owned_tasks
 
 
+@pytest.mark.parametrize("protocol", ["anthropic", "openai", "qwen"])
+@pytest.mark.parametrize("partial_text", [False, True])
+async def test_collector_cancellation_closes_httpx_response_and_client(protocol, partial_text, monkeypatch):
+    import json
+    import httpx
+    from weizhcode.models import ProviderConfig
+    from weizhcode.providers import create_provider
+    from weizhcode.providers import sse
+    entered, closed, clients = asyncio.Event(), asyncio.Event(), []
+    packet = {
+        "anthropic": {"type":"content_block_delta", "delta":{"type":"text_delta", "text":"partial"}},
+        "openai": {"type":"response.output_text.delta", "delta":"partial"},
+        "qwen": {"choices":[{"delta":{"content":"partial"}}]},
+    }[protocol]
+    class BlockingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if partial_text:
+                yield ("data: " + json.dumps(packet) + "\n\n").encode()
+            entered.set()
+            await asyncio.Event().wait()
+        async def aclose(self):
+            closed.set()
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"content-type":"text/event-stream"}, stream=BlockingStream()))
+    original = httpx.AsyncClient
+    def factory(*args, **kwargs):
+        client = original(*args, transport=transport, **kwargs)
+        clients.append(client)
+        return client
+    monkeypatch.setattr(sse.httpx, "AsyncClient", factory)
+    provider = create_provider(ProviderConfig("test", protocol, "test", "https://example.test/v1", "fake"))
+    context, state, events = RunContext(), StreamState(), []
+    async def emit(event):
+        events.append(event)
+    work = asyncio.create_task(StreamCollector(provider).collect([], tools=[], system_prompt="",
+                               context=context, state=state, emit=emit))
+    await asyncio.wait_for(entered.wait(), 1)
+    context.cancel_event.set()
+    assert await asyncio.wait_for(work, 1) is None
+    assert closed.is_set() and all(c.is_closed for c in clients)
+    assert state.cancelled and not context.owned_tasks
+    assert "".join(e.text for e in events) == ("partial" if partial_text else "")
+
+
 async def test_collector_usage_snapshot_merge_no_sum_and_incomplete():
     result, state, _, _ = await collect([
         ProviderEvent("usage", usage=TokenUsage(10, 2, False, "test")),

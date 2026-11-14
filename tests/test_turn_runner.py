@@ -22,9 +22,9 @@ def test_run_context_contract_isolation_and_frozen_mode():
 
 
 def test_loop_prompts_cover_plan_and_execution():
-    from weizhcode.prompts import LOOP_SYSTEM_PROMPT, PLAN_MODE_REMINDER, EXECUTE_DIRECTIVE
-    assert "持续" in LOOP_SYSTEM_PROMPT and "数据" in LOOP_SYSTEM_PROMPT
-    assert "不需要逐次审批" in LOOP_SYSTEM_PROMPT
+    from weizhcode.prompts import SYSTEM_PROMPT, PLAN_MODE_REMINDER, EXECUTE_DIRECTIVE
+    assert "持续" in SYSTEM_PROMPT and "数据" in SYSTEM_PROMPT
+    assert "不需要逐次审批" in SYSTEM_PROMPT
     assert "禁止" in PLAN_MODE_REMINDER and "/do" in PLAN_MODE_REMINDER
     assert EXECUTE_DIRECTIVE == "请按上面的计划开始执行。"
 
@@ -108,7 +108,7 @@ import pytest
 
 from weizhcode.conversation import Conversation
 from weizhcode.models import ChatMessage, ProviderEvent, ToolCall, ToolContext, ToolResult, TurnEvent
-from weizhcode.prompts import SYSTEM_PROMPT, FINAL_PROMPT
+from weizhcode.prompts import SYSTEM_PROMPT
 from weizhcode.redaction import Redactor
 from weizhcode.tools import create_default_registry
 from weizhcode.tools.executor import ToolExecutor
@@ -135,10 +135,12 @@ class FakeExecutor:
         self.closed = False
         self.status = status
 
-    async def run(self, call, *, approve=None):
+    async def execute(self, slot, *, mode, cancel, emit):
+        call = slot.call
         self.calls.append(call)
-        yield TurnEvent("tool_result", local_id=call.local_id,
-                        result=ToolResult(call.call_id, call.name, "full result\n" * 20, self.status))
+        slot.execution_started = True
+        slot.result = ToolResult(call.call_id, call.name, "full result\n" * 20, self.status)
+        return slot.result
     async def aclose(self):
         self.closed = True
 
@@ -168,8 +170,8 @@ class LoopExecutor:
 
 
 def loop_runner(replies, executor=None, **kwargs):
-    from weizhcode.turn_runner import _LoopRunner
-    return _LoopRunner(FakeProvider(replies), Conversation(), create_default_registry(),
+    from weizhcode.turn_runner import TurnRunner
+    return TurnRunner(FakeProvider(replies), Conversation(), create_default_registry(),
                        executor or LoopExecutor(), Redactor(["secret-token"]), **kwargs)
 
 
@@ -214,6 +216,9 @@ async def test_iteration_limit_boundary_exact_25_saves_last_multiple_results():
     assert events[-1].reason == "max_iterations" and "25" in events[-2].text
     assert len(r.conversation.messages()[-2].tool_results) == 2
     assert r.conversation.messages()[-1].provider_payload["source"] == "application"
+    r.provider.replies = [reply("new task")]
+    assert [e async for e in r.run("next")][-1].reason == "completed"
+    assert len(r.executor.calls) == 50 and len(r.provider.requests) == 26
 
 
 async def test_iteration_limit_boundary_final_text_counts_and_completes():
@@ -367,6 +372,15 @@ async def test_loop_lifecycle_reuse_consumer_closes_waiting_stream():
     assert [e async for e in r.run("next")][-1].reason == "completed"
 
 
+async def test_event_channel_shutdown_stream_closed_before_first_iteration():
+    r = loop_runner([reply("next")])
+    stream = r.run("never consumed")
+    await asyncio.wait_for(stream.aclose(), 1)
+    assert not r.busy and not r.provider.requests
+    assert not r.executor.closed
+    assert [e async for e in r.run("next")][-1].reason == "completed"
+
+
 async def test_loop_error_recovery_cleanup_failure_stops_before_next_request():
     class BrokenCleanup(LoopExecutor):
         async def execute(self, slot, **kwargs):
@@ -405,9 +419,30 @@ async def test_loop_lifecycle_reuse_app_close_unconsumed_full_channel():
     assert not r.busy and r.executor.closed and r._task.done()
 
 
+async def test_loop_budget_context_large_result_and_no_history_trim(tmp_path):
+    from weizhcode.models import ToolContext
+    from weizhcode.tools.executor import ToolExecutor
+    (tmp_path / "large").write_text(("fake-secret-token" + "x" * 2000 + "\n") * 300, encoding="utf-8")
+    r = loop_runner([reply("", (ToolCall("a", "read_file", '{"path":"large"}'),)),
+                     [ProviderEvent("error", message="context length exceeded")], reply("recovered")],
+                    ToolExecutor(create_default_registry(), ToolContext(tmp_path), Redactor(["fake-secret-token"])))
+    for i in range(30):
+        r.conversation.add_user_message(f"old-{i}")
+        r.conversation.add_assistant_message("history" * 100)
+    before = r.conversation.messages()
+    events = [e async for e in r.run("read large")]
+    assert events[-1].reason == "provider_error"
+    result = r.conversation.messages()[-2].tool_results[0]
+    assert len(result.to_model_text()) <= 20000 and result.truncated
+    assert "fake-secret-token" not in result.to_model_text()
+    assert r.conversation.messages()[:60] == before
+    assert [e async for e in r.run("next")][-1].reason == "completed"
+    assert len([m for m in r.conversation.messages() if m.tool_results]) == 1
+
+
 def test_prompts_match_tools():
     assert all(t.name in SYSTEM_PROMPT for t in create_default_registry().definitions())
-    assert "禁止再次调用" in FINAL_PROMPT
+    assert "持续" in SYSTEM_PROMPT
 
 
 async def test_runner_text_single_request_and_single_flight():
@@ -415,7 +450,7 @@ async def test_runner_text_single_request_and_single_flight():
     stream = r.run("hello")
     assert r.busy
     rejected = [e async for e in r.run("second")]
-    assert rejected[-1].type == "error"
+    assert rejected[-1].type == "notice"
     events = [e async for e in stream]
     assert events[-1].type == "turn_done"
     assert not r.busy
@@ -432,58 +467,57 @@ async def test_runner_tool_round(status):
     events = [e async for e in r.run("read")]
     assert len(r.executor.calls) == 1
     assert len(r.provider.requests) == 2
-    assert not r.provider.requests[1][1]["allow_tools"]
+    assert r.provider.requests[1][1]["allow_tools"]
     assert [m.role for m in r.conversation.messages()] == ["user", "assistant", "tool", "assistant"]
     assert r.provider.requests[1][0][-1].tool_results[0].content.count("full result") == 20
-    assert next(i for i,e in enumerate(events) if e.type == "tool_result") < next(i for i,e in enumerate(events) if e.phase == "final")
+    assert next(i for i,e in enumerate(events) if e.type == "tool_result") < next(i for i,e in enumerate(events) if e.type == "iteration_started" and e.iteration == 2)
 
 
-@pytest.mark.parametrize("name", ["read_file", "write_file", "run_command"])
-async def test_runner_limits_multiple_calls_execute_none(name):
-    calls = tuple(ToolCall(f"id{i}", name, '{}') for i in range(2))
+@pytest.mark.parametrize("name,args", [("read_file", {"path":"a"}), ("write_file", {"path":"a","content":"x"}), ("run_command", {"command":"echo hi"})])
+async def test_runner_multiple_calls_execute_in_safe_order(name, args):
+    import json
+    calls = tuple(ToolCall(f"id{i}", name, json.dumps(args)) for i in range(2))
     r = runner([reply("before", calls), reply()])
-    _ = [e async for e in r.run("do")]
-    assert r.executor.calls == []
-    assert len(r.provider.requests) == 2
-    results = r.conversation.messages()[2].tool_results
-    assert len(results) == 2
-    assert all(x.error_code == "TOO_MANY_TOOL_CALLS" for x in results)
-
-
-async def test_runner_limits_final_extra_call():
-    first = ToolCall("first", "read_file", '{}')
-    final = ToolCall("final", "write_file", '{}')
-    r = runner([reply("before", (first,)), reply("again", (final,))])
     events = [e async for e in r.run("do")]
-    assert len(r.provider.requests) == 2
-    assert len(r.executor.calls) == 1
-    assert r.conversation.messages()[-1].tool_results[0].error_code == "TOOL_ROUND_LIMIT"
-    assert "上限" in events[-2].text
+    assert len(r.executor.calls) == 2 and len(r.provider.requests) == 2
+    results = r.conversation.messages()[2].tool_results
+    assert len(results) == 2 and all(not x.is_error for x in results)
+    assert events[-1].reason == "completed"
+
+
+async def test_runner_continues_beyond_second_tool_response():
+    first = ToolCall("first", "read_file", '{"path":"a"}')
+    second = ToolCall("second", "write_file", '{"path":"a","content":"x"}')
+    r = runner([reply("before", (first,)), reply("again", (second,)), reply("done")])
+    events = [e async for e in r.run("do")]
+    assert len(r.provider.requests) == 3 and len(r.executor.calls) == 2
+    assert events[-1].reason == "completed"
 
 
 async def test_runner_recovery_incomplete_then_retry():
     r = runner([[ProviderEvent("text_delta", text="partial")], reply()])
     events = [e async for e in r.run("first")]
-    assert events[-1].type == "error"
-    assert [m.role for m in r.conversation.messages()] == ["user"]
+    assert events[-1].reason == "provider_error"
+    assert [m.role for m in r.conversation.messages()] == ["user", "assistant"]
+    assert r.conversation.messages()[-1].provider_payload["source"] == "application"
     _ = [e async for e in r.run("second")]
     assert len(r.executor.calls) == 0
     assert r.conversation.messages()[-1].content == "answer"
 
 
 async def test_runner_recovery_final_failure_preserves_exchange():
-    call = ToolCall("id", "write_file", '{}')
+    call = ToolCall("id", "write_file", '{"path":"a","content":"x"}')
     r = runner([reply("before", (call,)), RuntimeError("secret-token network"), reply()])
     events = [e async for e in r.run("write")]
-    assert events[-1].type == "error"
+    assert events[-1].reason == "provider_error"
     assert "secret-token" not in events[-1].text
-    assert [m.role for m in r.conversation.messages()] == ["user", "assistant", "tool"]
+    assert [m.role for m in r.conversation.messages()] == ["user", "assistant", "tool", "assistant"]
     _ = [e async for e in r.run("next")]
     assert len(r.executor.calls) == 1
 
 
 async def test_security_pipeline_stream_and_original_arguments():
-    call = ToolCall("id", "write_file", '{"content":"secret-token"}')
+    call = ToolCall("id", "write_file", '{"path":"a","content":"secret-token"}')
     r = runner([[ProviderEvent("text_delta", text="secret-"), ProviderEvent("text_delta", text="token"),
                  ProviderEvent("done", assistant_message=ChatMessage("assistant", "secret-token", tool_calls=(call,)))],
                 reply("secret-token")])
@@ -506,13 +540,15 @@ async def test_app_shutdown_runner_cancels_stream():
                 closed.set()
     r = runner([])
     r.provider = WaitingProvider()
+    r.collector.provider = r.provider
     async def consume():
         return [e async for e in r.run("hello")]
     task = asyncio.create_task(consume())
     await started.wait()
     await r.aclose()
     await r.aclose()
-    assert task.cancelled() and closed.is_set() and r.executor.closed
+    await asyncio.wait_for(task, 2)
+    assert not task.cancelled() and closed.is_set() and r.executor.closed
     assert not r.busy
 
 

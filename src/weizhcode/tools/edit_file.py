@@ -5,9 +5,9 @@ from weizhcode.tools.limits import excerpt
 
 
 class EditFileTool(BaseTool):
-    definition = ToolDefinition("edit_file", "对原文精确唯一匹配后替换，须用户批准。old_text 不含读取行号，换行必须与原文一致。",
+    definition = ToolDefinition("edit_file", "对原文精确唯一匹配后替换。old_text 不含读取行号，换行必须与原文一致。",
                                 schema({"path": TEXT, "old_text": TEXT, "new_text": {"type": "string"}},
-                                       ["path", "old_text", "new_text"]), requires_confirmation=True, read_only=False)
+                                       ["path", "old_text", "new_text"]), read_only=False)
 
     def _prepare(self, call, context):
         args = dict(call.arguments or {})

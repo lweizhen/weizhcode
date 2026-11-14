@@ -39,6 +39,30 @@ async def test_mixed_diagnostic_preserves_executed_facts(protocol):
     assert "secret-token" not in text
 
 
+@pytest.mark.parametrize("protocol", ["anthropic", "openai", "qwen"])
+async def test_loop_provider_payload_auto_multi_and_native_replay(protocol):
+    requests = []
+    provider = make_provider(protocol, tool_events(protocol, count=2), requests)
+    events = [e async for e in provider.stream_chat([ChatMessage("user", "read")],
+              tools=create_default_registry().definitions())]
+    message = events[-1].assistant_message
+    assert len(message.tool_calls) == 2
+    if protocol == "anthropic":
+        assert requests[0]["tool_choice"] == {"type": "auto"}
+    elif protocol == "openai":
+        assert requests[0]["parallel_tool_calls"] is True
+        assert requests[0]["store"] is False and "stream_options" not in requests[0]
+    else:
+        assert requests[0]["stream_options"] == {"include_usage": True}
+    conv = Conversation()
+    conv.add_user_message("read")
+    conv.add_tool_exchange(message, [ToolResult(c.call_id, c.name, "ok") for c in message.tool_calls])
+    _ = [e async for e in provider.stream_chat(conv.messages(), tools=create_default_registry().definitions())]
+    encoded = json.dumps(requests[1], ensure_ascii=False)
+    assert "call0" in encoded and "call1" in encoded
+    assert "execution_facts" not in encoded and "diagnostic" not in encoded
+
+
 def tool_events(protocol, raw='{"path":"中文.txt"}', *, count=1):
     if protocol == "anthropic":
         events = []
@@ -96,7 +120,7 @@ async def test_stream_tool_fragments_and_roundtrip(protocol, count):
     assert all(c.arguments == {"path": "中文.txt"} for c in calls)
     assert len({c.local_id for c in calls}) == count
     assert len(requests[0]["tools"]) == 6
-    assert requests[0]["tool_choice"] == ({"type": "auto", "disable_parallel_tool_use": True} if protocol == "anthropic" else "auto")
+    assert requests[0]["tool_choice"] == ({"type": "auto"} if protocol == "anthropic" else "auto")
     conv = Conversation()
     conv.add_user_message("read")
     conv.add_tool_exchange(events[-1].assistant_message,

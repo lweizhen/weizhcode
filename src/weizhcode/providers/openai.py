@@ -30,7 +30,7 @@ class OpenAIProvider:
         if tools:
             body["tools"] = [{"type": "function", "name": t.name, "description": t.description,
                              "parameters": t.parameters, "strict": False} for t in tools]
-            body["parallel_tool_calls"] = False
+            body["parallel_tool_calls"] = True
             body["tool_choice"] = "auto" if allow_tools else "none"
         items = {}
         buffers = {}
@@ -113,8 +113,12 @@ class OpenAIProvider:
                 yield ProviderEvent(type="tool_call", tool_call=call)
             if usage.seen:
                 yield ProviderEvent("usage", usage=usage.snapshot(complete=True))
+            final_text = "".join(str(block.get("text", block.get("refusal", "")))
+                                 for item in completed if item.get("type") == "message"
+                                 for block in item.get("content", [])
+                                 if block.get("type") in {"output_text", "refusal"})
             yield ProviderEvent(type="done", assistant_message=ChatMessage(
-                "assistant", "".join(parts), tool_calls=tuple(final_calls),
+                "assistant", final_text if final_text else "".join(parts), tool_calls=tuple(final_calls),
                 provider_payload={"openai_items": completed}))
         except (ProviderError, StreamError, ValueError, TypeError, KeyError, AttributeError) as exc:
             yield ProviderEvent(type="error", message=redact_secret(str(exc), self.config.api_key))

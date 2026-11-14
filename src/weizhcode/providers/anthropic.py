@@ -28,7 +28,7 @@ class AnthropicProvider:
             body["system"] = system_prompt
         if tools:
             body["tools"] = [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools]
-            body["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True} if allow_tools else {"type": "none"}
+            body["tool_choice"] = {"type": "auto"} if allow_tools else {"type": "none"}
         blocks = {}
         closed = set()
         text_parts = []
@@ -60,6 +60,9 @@ class AnthropicProvider:
                             block["_local_id"] = pending.local_id
                             yield ProviderEvent(type="tool_call_start", tool_call=pending)
                         blocks[index] = block
+                        if block.get("type") == "text" and block.get("text"):
+                            text_parts.append(block["text"])
+                            yield ProviderEvent("text_delta", text=block["text"])
                     elif kind == "content_block_delta":
                         if index in closed:
                             raise StreamError("已结束的内容块仍有增量")
