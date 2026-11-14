@@ -1127,35 +1127,35 @@
 | T9 | 已完成 | loop_exchange_contract：1 passed；数量/顺序/名称校验、原子失败，保留既有深复制回归。 |
 | T10 | 已完成 | mixed_diagnostic：3 passed（三协议）；真实成功/失败、执行事实及脱敏回放。 |
 | T11 | 已完成 | application_stop_notice：1 passed；应用来源、去重与后续任务。 |
-| T12 | 未开始 | 尚未执行 |
-| T13 | 未开始 | 尚未执行 |
-| T14 | 未开始 | 尚未执行 |
-| T15 | 未开始 | 尚未执行 |
-| T16 | 未开始 | 尚未执行 |
-| T17 | 未开始 | 尚未执行 |
-| T18 | 未开始 | 尚未执行 |
-| T19 | 未开始 | 尚未执行 |
-| T20 | 未开始 | 尚未执行 |
-| T21 | 未开始 | 尚未执行 |
-| T22 | 未开始 | 尚未执行 |
-| T23 | 未开始 | 尚未执行 |
-| T24 | 未开始 | 尚未执行 |
-| T25 | 未开始 | 尚未执行 |
-| T26 | 未开始 | 尚未执行 |
-| T27 | 未开始 | 尚未执行 |
-| T28 | 未开始 | 尚未执行 |
-| T29 | 未开始 | 尚未执行 |
-| T30 | 未开始 | 尚未执行 |
-| T31 | 未开始 | 尚未执行 |
-| T32 | 未开始 | 尚未执行 |
-| T33 | 未开始 | 尚未执行 |
-| T34 | 未开始 | 尚未执行 |
-| T35 | 未开始 | 尚未执行 |
-| T36 | 未开始 | 尚未执行 |
-| T37 | 未开始 | 尚未执行 |
-| T38 | 未开始 | 尚未执行 |
-| T39 | 未开始 | 尚未执行 |
-| T40 | 未开始 | 尚未执行 |
+| T12 | 已完成 | anthropic_usage：累计覆盖、缓存三项相加、缺省/显式 null 和递减快照；协议回归通过。 |
+| T13 | 已完成 | responses_usage：总量不叠加缓存/推理子项，失败部分统计保留；协议回归通过。 |
+| T14 | 已完成 | qwen_usage：include_usage、空 choices 末包、重复包与字段缺失；协议回归通过。 |
+| T15 | 已完成 | collector_dual_path：先显示正文再收齐，末尾补发、跨片脱敏与不透明载荷不展示。 |
+| T16 | 已完成 | collector_completion_gate：缺 done、缺消息、正文不一致、空正文和最终调用权威去重。 |
+| T17 | 已完成 | collector_cancellation：无 token 等待与同拍取消，三实际适配器源流均确定性关闭。 |
+| T18 | 已完成 | collector_usage_snapshot：累计/重复报告不相加、递减不覆盖，错误保留部分统计。 |
+| T19 | 已完成 | bounded_event_channel：128 容量背压、事件保序、显示副本脱敏不改原参数及结果。 |
+| T20 | 已完成 | event_channel_shutdown：满队列与空等待消费者离开均收尾，无阻塞结束哨兵。 |
+| T21 | 已完成 | loop_execute_basic：真实临时文件无审批写/读/失败，结果先写槽；旧入口尚未切换。 |
+| T22 | 已完成 | plan_execution_gate：写/改/命令均零 worker、零副作用，正常模式不受影响。 |
+| T23 | 已完成 | loop_tool_budget：准备+执行共享同一预算，实际超时收尾。 |
+| T24 | 已完成 | cancel_preserves_result：清理期间与结果同拍取消保留成功；未确认区分是否已开始。 |
+| T25 | 已完成 | loop_process_cleanup：原生 Windows 创建/准备/命令树/写临时资源取消；保留外部替换资源和原文件。 |
+| T26 | 已完成 | cleanup_infrastructure_failure：保留成功事实，另记清理基础设施故障，不回显异常原文。 |
+| T27 | 已完成 | scheduler_preflight：重复 ID 全冲突拒绝，独立合法调用仍执行，缺 ID/坏 JSON/未知结构化返回。 |
+| T28 | 已完成 | readonly_batch_overlap：闸门证明两读实际重叠，逆完成仍保序。 |
+| T29 | 已完成 | readonly_concurrency_limit：峰值 4，许可等待取消不迟到启动。 |
+| T30 | 已完成 | side_effect_batch_barriers：读/读/写/读/改/命令及未知/非法屏障；实际文件可见性断言。 |
+| T31 | 已完成 | batch_cancellation_results：保留已完成结果、补齐取消、阻止后续副作用。 |
+| T32 | 已完成 | batch_event_order：开始行/结果按调用原序，状态按 local_id 更新。 |
+| T33 | 已完成 | loop_single_flight：同步占用、单次自然/空回复结束；新驱动仍私有，正式入口待 T49。 |
+| T34 | 已完成 | loop_multistep_history：真实文件 read→write→read→最终正文，四请求及完整配对。 |
+| T35 | 已完成 | iteration_limit_boundary：精确 25 请求/50 工具结果、最后文字正常结束、同拍取消优先。 |
+| T36 | 已完成 | unknown_round_threshold：三全未知停止、已注册参数/执行失败重置、新任务重置。 |
+| T37 | 已完成 | loop_error_recovery：残缺流零执行、真实写入后续答失败不重做、工具失败可调整、清理故障停止。 |
+| T38 | 已完成 | session_usage_settlement：同请求重复用量只记一次、跨用户保留与缺失次数。 |
+| T39 | 已完成 | loop_mode_control：模式冻结、plan 三定义及真实门禁、/do 对应指令立即全工具执行。 |
+| T40 | 已完成 | loop_lifecycle_reuse：重复取消后同实例可再用、消费者离开、未消费满队列应用关闭。 |
 | T41 | 未开始 | 尚未执行 |
 | T42 | 未开始 | 尚未执行 |
 | T43 | 未开始 | 尚未执行 |
@@ -1228,3 +1228,7 @@
 ## 8. 开发与验收记录
 
 四份文档已全部批准。基础组局部命令为：uv run python -m pytest tests/test_provider_events.py tests/test_turn_runner.py tests/test_tui.py tests/test_tool_executor.py tests/test_tool_registry.py tests/test_conversation.py tests/test_provider_tools.py -k 'usage_contract or run_context_contract or loop_event_contract or tool_slot_contract or readonly_classification or readonly_registry or loop_prompts or loop_exchange_contract or mixed_diagnostic or application_stop_notice' -q，实际 16 passed、110 deselected；compileall 通过。基础组全量回归 uv run python -m pytest -q -rs：242 passed、2 skipped（与基线相同的权限/平台原因），37.18 秒。未运行真实 API，未改用户配置，未推送 GitHub。
+
+2026-11-14，核心组 T12～T40：三协议/收集器局部 62 passed；事件通道局部 3 passed；执行器门禁/超时/结果保留初测 8 passed；取消清理与连接关闭专项修正后 12 passed；调度器 6 passed；Loop 初组 14 passed，随后补清理故障/已知失败重置/满队列退出。全量最终 uv run python -m pytest -q -rs：304 passed、2 skipped（目录链接权限和 POSIX 原生平台），43.97 秒；compileall 通过。当前正式入口仍保持旧行为，新增私有路径已验证，T41～T49 将统一接线。
+
+一次临时资源归属测试初测失败：Windows 拒绝替换仍被子进程打开的临时文件。测试调整为实际进程结束后、资源归属校验前模拟外部替换，重新验证原文件/外部对象保护通过；未删除断言、未增加 skip。

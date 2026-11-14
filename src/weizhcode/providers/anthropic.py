@@ -4,10 +4,11 @@ import json
 from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
 from dataclasses import replace
+from contextlib import aclosing
 
 from weizhcode.errors import ProviderError, StreamError, redact_secret
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
-from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, diagnostic_text, make_call
+from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, UsageAccumulator, diagnostic_text, make_call
 from weizhcode.providers.sse import SSEEvent, stream_sse
 from weizhcode.redaction import Redactor
 
@@ -33,56 +34,65 @@ class AnthropicProvider:
         text_parts = []
         stop_reason = None
         complete = False
+        usage = UsageAccumulator("anthropic")
         try:
-            async for event in self._stream(
+            source = self._stream(
                 "POST", f"{self.config.base_url}/messages",
                 headers={"content-type": "application/json", "x-api-key": self.config.api_key,
                          "anthropic-version": "2023-06-01"}, json_body=body,
-            ):
-                parsed = event.json()
-                kind = parsed.get("type") or event.event
-                index = parsed.get("index", 0)
-                if kind == "content_block_start":
-                    if index in blocks:
-                        raise StreamError("重复的内容块")
-                    block = deepcopy(parsed["content_block"])
-                    if block.get("type") == "tool_use":
-                        block["_raw"] = ""
-                        pending = make_call(block.get("id"), block.get("name"), "")
-                        block["_local_id"] = pending.local_id
-                        yield ProviderEvent(type="tool_call_start", tool_call=pending)
-                    blocks[index] = block
-                elif kind == "content_block_delta":
-                    if index in closed:
-                        raise StreamError("已结束的内容块仍有增量")
-                    delta = parsed.get("delta") or {}
-                    dtype = delta.get("type")
-                    block = blocks.setdefault(index, {"type": "text", "text": ""})
-                    if dtype == "text_delta":
-                        text = delta.get("text") or ""
-                        block["text"] = block.get("text", "") + text
-                        text_parts.append(text)
-                        if text:
-                            yield ProviderEvent(type="text_delta", text=text)
-                    elif dtype == "input_json_delta":
-                        if block.get("type") != "tool_use":
-                            raise StreamError("工具参数不属于工具块")
-                        block["_raw"] += delta.get("partial_json") or ""
-                    elif dtype == "thinking_delta":
-                        block["thinking"] = block.get("thinking", "") + (delta.get("thinking") or "")
-                    elif dtype == "signature_delta":
-                        block["signature"] = block.get("signature", "") + (delta.get("signature") or "")
-                elif kind == "content_block_stop":
-                    if index not in blocks or index in closed:
-                        raise StreamError("内容块结束顺序错误")
-                    closed.add(index)
-                elif kind == "message_delta":
-                    stop_reason = (parsed.get("delta") or {}).get("stop_reason", stop_reason)
-                elif kind == "message_stop":
-                    complete = True
-                    break
-                elif kind == "error":
-                    raise StreamError(_error_message(parsed, "Claude 请求失败"))
+            )
+            async with aclosing(source):
+                async for event in source:
+                    parsed = event.json()
+                    kind = parsed.get("type") or event.event
+                    index = parsed.get("index", 0)
+                    if kind == "message_start":
+                        raw_usage = (parsed.get("message") or {}).get("usage")
+                        if raw_usage is not None:
+                            yield ProviderEvent("usage", usage=usage.update(raw_usage))
+                    elif kind == "content_block_start":
+                        if index in blocks:
+                            raise StreamError("重复的内容块")
+                        block = deepcopy(parsed["content_block"])
+                        if block.get("type") == "tool_use":
+                            block["_raw"] = ""
+                            pending = make_call(block.get("id"), block.get("name"), "")
+                            block["_local_id"] = pending.local_id
+                            yield ProviderEvent(type="tool_call_start", tool_call=pending)
+                        blocks[index] = block
+                    elif kind == "content_block_delta":
+                        if index in closed:
+                            raise StreamError("已结束的内容块仍有增量")
+                        delta = parsed.get("delta") or {}
+                        dtype = delta.get("type")
+                        block = blocks.setdefault(index, {"type": "text", "text": ""})
+                        if dtype == "text_delta":
+                            text = delta.get("text") or ""
+                            block["text"] = block.get("text", "") + text
+                            text_parts.append(text)
+                            if text:
+                                yield ProviderEvent(type="text_delta", text=text)
+                        elif dtype == "input_json_delta":
+                            if block.get("type") != "tool_use":
+                                raise StreamError("工具参数不属于工具块")
+                            block["_raw"] += delta.get("partial_json") or ""
+                        elif dtype == "thinking_delta":
+                            block["thinking"] = block.get("thinking", "") + (delta.get("thinking") or "")
+                        elif dtype == "signature_delta":
+                            block["signature"] = block.get("signature", "") + (delta.get("signature") or "")
+                    elif kind == "content_block_stop":
+                        if index not in blocks or index in closed:
+                            raise StreamError("内容块结束顺序错误")
+                        closed.add(index)
+                    elif kind == "message_delta":
+                        stop_reason = (parsed.get("delta") or {}).get("stop_reason", stop_reason)
+                        if parsed.get("usage") is not None:
+                            yield ProviderEvent("usage", usage=usage.update(parsed["usage"]))
+                    elif kind == "message_stop":
+                        complete = True
+                        break
+                    elif kind == "error":
+                        raise StreamError(_error_message(parsed, "Claude 请求失败"))
             if not complete or stop_reason not in {"end_turn", "tool_use", "stop_sequence"}:
                 raise StreamError("Claude 流式回复未完整结束，不执行工具")
             if set(blocks) != closed:
@@ -104,6 +114,8 @@ class AnthropicProvider:
                 raise StreamError("工具调用与回复结束原因不一致")
             for call in assembled:
                 yield ProviderEvent(type="tool_call", tool_call=call)
+            if usage.seen:
+                yield ProviderEvent("usage", usage=usage.snapshot(complete=True))
             yield ProviderEvent(type="done", assistant_message=ChatMessage(
                 "assistant", "".join(text_parts), tool_calls=tuple(assembled),
                 provider_payload={"anthropic_blocks": replay}))

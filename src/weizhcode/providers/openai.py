@@ -4,10 +4,11 @@ import json
 from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
 from dataclasses import replace
+from contextlib import aclosing
 
 from weizhcode.errors import ProviderError, StreamError, redact_secret
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
-from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, diagnostic_text, make_call, safe_arguments
+from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, UsageAccumulator, diagnostic_text, make_call, safe_arguments
 from weizhcode.providers.sse import SSEEvent, stream_sse
 from weizhcode.redaction import Redactor
 
@@ -36,56 +37,64 @@ class OpenAIProvider:
         local_ids = {}
         parts = []
         completed = None
+        usage = UsageAccumulator("openai")
         try:
-            async for event in self._stream(
+            source = self._stream(
                 "POST", f"{self.config.base_url}/responses",
                 headers={"content-type": "application/json", "authorization": f"Bearer {self.config.api_key}"},
                 json_body=body,
-            ):
-                parsed = event.json()
-                kind = parsed.get("type") or event.event
-                index = parsed.get("output_index")
-                if kind in {"response.output_text.delta", "response.refusal.delta"}:
-                    text = parsed.get("delta") or ""
-                    parts.append(text)
-                    if text:
-                        yield ProviderEvent(type="text_delta", text=text)
-                elif kind == "response.output_item.added":
-                    if not isinstance(index, int) or index in items:
-                        raise StreamError("OpenAI 输出项索引错误")
-                    item = deepcopy(parsed["item"])
-                    items[index] = item
-                    if item.get("type") == "function_call":
-                        buffers[index] = item.get("arguments") or ""
-                        pending = make_call(item.get("call_id"), item.get("name"), "")
-                        local_ids[index] = pending.local_id
-                        yield ProviderEvent(type="tool_call_start", tool_call=pending)
-                elif kind == "response.function_call_arguments.delta":
-                    if index not in buffers or parsed.get("item_id") not in (None, items[index].get("id")):
-                        raise StreamError("OpenAI 参数分片没有对应调用")
-                    buffers[index] += parsed.get("delta") or ""
-                elif kind == "response.function_call_arguments.done":
-                    if index not in buffers:
-                        raise StreamError("OpenAI 参数结束没有对应调用")
-                    if buffers[index] != parsed.get("arguments"):
-                        raise StreamError("OpenAI 参数分片与完整参数不一致")
-                elif kind == "response.output_item.done":
-                    item = deepcopy(parsed["item"])
-                    if index not in items or item.get("id") != items[index].get("id"):
-                        raise StreamError("OpenAI 输出项结束不匹配")
-                    if index in buffers and item.get("arguments") != buffers[index]:
-                        raise StreamError("OpenAI 工具参数不完整")
-                    items[index] = item
-                elif kind == "response.completed":
-                    response = parsed.get("response") or {}
-                    if response.get("status") != "completed":
-                        raise StreamError("OpenAI 回复状态不是 completed")
-                    completed = response.get("output")
-                    if not isinstance(completed, list):
-                        raise StreamError("OpenAI 完整输出缺失")
-                    break
-                elif kind in {"error", "response.failed", "response.incomplete"}:
-                    raise StreamError(_error_message(parsed, "OpenAI 回复失败或被截断"))
+            )
+            async with aclosing(source):
+                async for event in source:
+                    parsed = event.json()
+                    kind = parsed.get("type") or event.event
+                    index = parsed.get("output_index")
+                    if kind in {"response.output_text.delta", "response.refusal.delta"}:
+                        text = parsed.get("delta") or ""
+                        parts.append(text)
+                        if text:
+                            yield ProviderEvent(type="text_delta", text=text)
+                    elif kind == "response.output_item.added":
+                        if not isinstance(index, int) or index in items:
+                            raise StreamError("OpenAI 输出项索引错误")
+                        item = deepcopy(parsed["item"])
+                        items[index] = item
+                        if item.get("type") == "function_call":
+                            buffers[index] = item.get("arguments") or ""
+                            pending = make_call(item.get("call_id"), item.get("name"), "")
+                            local_ids[index] = pending.local_id
+                            yield ProviderEvent(type="tool_call_start", tool_call=pending)
+                    elif kind == "response.function_call_arguments.delta":
+                        if index not in buffers or parsed.get("item_id") not in (None, items[index].get("id")):
+                            raise StreamError("OpenAI 参数分片没有对应调用")
+                        buffers[index] += parsed.get("delta") or ""
+                    elif kind == "response.function_call_arguments.done":
+                        if index not in buffers:
+                            raise StreamError("OpenAI 参数结束没有对应调用")
+                        if buffers[index] != parsed.get("arguments"):
+                            raise StreamError("OpenAI 参数分片与完整参数不一致")
+                    elif kind == "response.output_item.done":
+                        item = deepcopy(parsed["item"])
+                        if index not in items or item.get("id") != items[index].get("id"):
+                            raise StreamError("OpenAI 输出项结束不匹配")
+                        if index in buffers and item.get("arguments") != buffers[index]:
+                            raise StreamError("OpenAI 工具参数不完整")
+                        items[index] = item
+                    elif kind == "response.completed":
+                        response = parsed.get("response") or {}
+                        if response.get("usage") is not None:
+                            yield ProviderEvent("usage", usage=usage.update(response["usage"]))
+                        if response.get("status") != "completed":
+                            raise StreamError("OpenAI 回复状态不是 completed")
+                        completed = response.get("output")
+                        if not isinstance(completed, list):
+                            raise StreamError("OpenAI 完整输出缺失")
+                        break
+                    elif kind in {"error", "response.failed", "response.incomplete"}:
+                        raw_usage = (parsed.get("response") or {}).get("usage")
+                        if raw_usage is not None:
+                            yield ProviderEvent("usage", usage=usage.update(raw_usage))
+                        raise StreamError(_error_message(parsed, "OpenAI 回复失败或被截断"))
             if completed is None:
                 raise StreamError("OpenAI 流式回复未完整结束，不执行工具")
             final_calls = []
@@ -102,6 +111,8 @@ class OpenAIProvider:
                 raise StreamError("OpenAI 最终输出缺少工具调用")
             for call in final_calls:
                 yield ProviderEvent(type="tool_call", tool_call=call)
+            if usage.seen:
+                yield ProviderEvent("usage", usage=usage.snapshot(complete=True))
             yield ProviderEvent(type="done", assistant_message=ChatMessage(
                 "assistant", "".join(parts), tool_calls=tuple(final_calls),
                 provider_payload={"openai_items": completed}))

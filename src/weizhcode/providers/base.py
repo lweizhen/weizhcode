@@ -4,10 +4,55 @@ from collections.abc import AsyncIterator, Sequence
 import json
 from typing import Protocol
 
-from weizhcode.models import ChatMessage, ProviderEvent, ToolCall, ToolDefinition, parse_tool_arguments
+from weizhcode.models import ChatMessage, ProviderEvent, TokenUsage, ToolCall, ToolDefinition, parse_tool_arguments
 
 
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
+
+class UsageAccumulator:
+    """协议累计字段只覆盖不相加；坏值不抹去已有可信值。"""
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.values: dict[str, int] = {}
+        self.invalid = False
+        self.seen = False
+
+    def update(self, raw) -> TokenUsage:
+        if not isinstance(raw, dict):
+            self.invalid = True
+            return self.snapshot()
+        if self.source == "qwen":
+            mapping = {"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens"}
+        else:
+            mapping = {key: key for key in ("input_tokens", "output_tokens")}
+        if self.source == "anthropic":
+            for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+                mapping[key] = key
+                if not self.seen and key not in raw:
+                    self.values[key] = 0
+        self.seen = True
+        for external, internal in mapping.items():
+            if external not in raw:
+                continue
+            value = raw[external]
+            if type(value) is not int or value < self.values.get(internal, 0):
+                self.invalid = True
+                continue
+            self.values[internal] = value
+        return self.snapshot()
+
+    def snapshot(self, *, complete: bool = False) -> TokenUsage:
+        inputs = self.values.get("input_tokens")
+        output = self.values.get("output_tokens")
+        if self.source == "anthropic" and inputs is not None:
+            cache_keys = ("cache_creation_input_tokens", "cache_read_input_tokens")
+            inputs = (inputs + sum(self.values[k] for k in cache_keys)
+                      if all(k in self.values for k in cache_keys) else None)
+        return TokenUsage(inputs, output,
+                          complete and not self.invalid and inputs is not None and output is not None,
+                          self.source)
 
 
 class Provider(Protocol):

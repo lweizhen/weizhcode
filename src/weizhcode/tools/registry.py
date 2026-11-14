@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import replace
 
@@ -41,8 +42,10 @@ class ToolRegistry:
         return tool is not None and tool.definition.read_only is True
 
     def validate(self, call: ToolCall) -> ToolCall | ToolResult:
-        if not call.call_id or len(call.call_id) > 512:
+        if not isinstance(call.call_id, str) or not call.call_id or len(call.call_id) > 512:
             return ToolResult.failure(call, "INVALID_ARGUMENTS", "缺少或非法工具调用 ID")
+        if not isinstance(call.name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", call.name):
+            return ToolResult.failure(call, "INVALID_ARGUMENTS", "工具名称非法")
         tool = self.get(call.name)
         if tool is None:
             return ToolResult.failure(call, "UNKNOWN_TOOL", f"未知工具：{call.name}")

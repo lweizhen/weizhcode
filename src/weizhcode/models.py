@@ -95,7 +95,7 @@ def wire_calls_valid(calls) -> bool:
     ids = [call.call_id for call in calls]
     return (all(isinstance(value, str) and 0 < len(value) <= 512 for value in ids)
             and len(set(ids)) == len(ids)
-            and all(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", call.name)
+            and all(isinstance(call.name, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", call.name)
                     and parse_tool_arguments(call.raw_arguments) is not None for call in calls))
 
 

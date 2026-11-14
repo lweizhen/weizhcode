@@ -49,6 +49,78 @@ def provider_config(protocol: str = "openai") -> ProviderConfig:
     )
 
 
+async def _usage_stream(provider_type, protocol, packets):
+    bodies = []
+    async def stream(*args, **kwargs):
+        bodies.append(kwargs["json_body"])
+        for packet in packets:
+            yield SSEEvent(None, packet if isinstance(packet, str) else json.dumps(packet))
+    events = [e async for e in provider_type(provider_config(protocol), stream).stream_chat([])]
+    return events, bodies
+
+
+async def test_anthropic_usage_cumulative_cache_and_missing():
+    packets = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 10, "output_tokens": 0,
+            "cache_creation_input_tokens": 3, "cache_read_input_tokens": 7,
+            "cache_creation": {"ephemeral_5m_input_tokens": 3}}}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}},
+        {"type": "message_delta", "usage": {"output_tokens": 2}}, {"type": "message_stop"}]
+    events, _ = await _usage_stream(AnthropicProvider, "anthropic", packets)
+    snapshots = [e.usage for e in events if e.type == "usage"]
+    assert snapshots[-1].input_tokens == 20 and snapshots[-1].output_tokens == 2
+    assert snapshots[-1].complete
+    assert [s.output_tokens for s in snapshots] == [0, 2, 2, 2]
+    packets[0]["message"]["usage"] = {"input_tokens": 0, "output_tokens": 0}
+    events, _ = await _usage_stream(AnthropicProvider, "anthropic", packets)
+    assert [e.usage for e in events if e.type == "usage"][-1].input_tokens == 0
+
+
+async def test_anthropic_usage_null_invalid_and_decreasing():
+    events, _ = await _usage_stream(AnthropicProvider, "anthropic", [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 4, "output_tokens": 3,
+            "cache_read_input_tokens": None}}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        {"type": "message_stop"}])
+    final = [e.usage for e in events if e.type == "usage"][-1]
+    assert final.output_tokens == 3 and not final.complete
+    assert final.input_tokens is None
+
+
+async def test_responses_usage_details_are_not_added():
+    usage = {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
+             "input_tokens_details": {"cached_tokens": 8}, "output_tokens_details": {"reasoning_tokens": 3}}
+    events, bodies = await _usage_stream(OpenAIProvider, "openai", [
+        {"type": "response.completed", "response": {"status": "completed", "output": [], "usage": usage}}])
+    final = [e.usage for e in events if e.type == "usage"][-1]
+    assert (final.input_tokens, final.output_tokens, final.complete) == (10, 4, True)
+    assert "stream_options" not in bodies[0]
+
+
+async def test_responses_usage_incomplete_retained():
+    events, _ = await _usage_stream(OpenAIProvider, "openai", [
+        {"type": "response.incomplete", "response": {"usage": {"input_tokens": 0}}}])
+    final = [e.usage for e in events if e.type == "usage"][-1]
+    assert final.input_tokens == 0 and final.output_tokens is None and not final.complete
+    assert events[-1].type == "error"
+
+
+async def test_qwen_usage_empty_choices_repeated_and_request():
+    packet = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}
+    events, bodies = await _usage_stream(QwenProvider, "qwen", [
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]}, packet, packet, "[DONE]"])
+    final = [e.usage for e in events if e.type == "usage"][-1]
+    assert (final.input_tokens, final.output_tokens, final.complete) == (5, 2, True)
+    assert bodies[0]["stream_options"] == {"include_usage": True}
+
+
+async def test_qwen_usage_missing_counts_not_zero():
+    events, _ = await _usage_stream(QwenProvider, "qwen", [
+        {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 0}}, "[DONE]"])
+    final = [e.usage for e in events if e.type == "usage"][-1]
+    assert final.input_tokens == 0 and final.output_tokens is None and not final.complete
+
+
 def test_provider_event_can_represent_text_delta() -> None:
     event = ProviderEvent(type="text_delta", text="hello")
 

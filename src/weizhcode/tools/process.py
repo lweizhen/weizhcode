@@ -95,11 +95,21 @@ class ManagedWorker:
             raise ToolFailure("INTERNAL_ERROR", "工作进程已关闭")
         options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
         environment = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-        self.process = await asyncio.create_subprocess_exec(
+        creation = asyncio.create_task(asyncio.create_subprocess_exec(
             sys.executable, "-m", "weizhcode.tools.worker", stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=environment, limit=256_000, **options,
-        )
+        ))
+        try:
+            self.process = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            # 创建系统进程的等待被取消，仍须接管实际创建结果再清理。
+            self.process = await creation
+            if self.process.returncode is None:
+                self.process.kill()
+            await self.process.wait()
+            self.process.stdin.close()
+            raise
         if self._closed:
             # 退出可能发生在创建子进程的 await 期间，此时尚未释放任何执行指令。
             self.process.kill()

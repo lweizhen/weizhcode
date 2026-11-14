@@ -28,6 +28,80 @@ def test_loop_prompts_cover_plan_and_execution():
     assert "禁止" in PLAN_MODE_REMINDER and "/do" in PLAN_MODE_REMINDER
     assert EXECUTE_DIRECTIVE == "请按上面的计划开始执行。"
 
+
+async def test_bounded_event_channel_backpressure_and_safe_copies():
+    import asyncio
+    from weizhcode.models import RunContext, ToolCall, ToolResult, TurnEvent
+    from weizhcode.redaction import Redactor
+    from weizhcode.turn_runner import _EventChannel
+    context = RunContext()
+    channel = _EventChannel(context, Redactor(["secret-key"]))
+    call = ToolCall("id", "read_file", '{"path":"secret-key"}', {"path": "secret-key\x1b[31m"})
+    result = ToolResult("id", "read_file", "secret-key" * 4000)
+    async def produce():
+        for i in range(130):
+            await channel.emit(TurnEvent("text_delta", text=str(i), tool_call=call, result=result))
+    producer = channel.start(produce())
+    for _ in range(1000):
+        if channel.queue.full():
+            break
+        await asyncio.sleep(0)
+    assert channel.queue.qsize() == 128 and not producer.done()
+    events = [e async for e in channel.events()]
+    assert [e.text for e in events] == list(map(str, range(130)))
+    assert "secret-key" not in events[0].tool_call.raw_arguments
+    assert "\x1b" not in events[0].tool_call.arguments["path"]
+    assert len(events[0].result.to_model_text()) <= 20000
+    assert call.arguments["path"].startswith("secret-key")
+    assert result.content.startswith("secret-key")
+
+
+async def test_event_channel_shutdown_full_queue_cleans_without_sentinel():
+    import asyncio
+    from weizhcode.models import RunContext, TurnEvent
+    from weizhcode.redaction import Redactor
+    from weizhcode.turn_runner import _EventChannel
+    context, cleaned = RunContext(), asyncio.Event()
+    channel = _EventChannel(context, Redactor())
+    async def produce():
+        try:
+            for _ in range(300):
+                await channel.emit(TurnEvent("text_delta", text="x"))
+                if context.cancel_event.is_set():
+                    break
+        finally:
+            cleaned.set()
+    producer = channel.start(produce())
+    for _ in range(1000):
+        if channel.queue.full():
+            break
+        await asyncio.sleep(0)
+    stream = channel.events()
+    await anext(stream)
+    await asyncio.wait_for(stream.aclose(), 1)
+    assert cleaned.is_set() and producer.done() and channel.done.is_set()
+    assert context.cancel_event.is_set()
+
+
+async def test_event_channel_shutdown_empty_queue_waiting_producer():
+    import asyncio
+    from weizhcode.models import RunContext, TurnEvent
+    from weizhcode.redaction import Redactor
+    from weizhcode.turn_runner import _EventChannel
+    context, entered = RunContext(), asyncio.Event()
+    channel = _EventChannel(context, Redactor())
+    async def produce():
+        await channel.emit(TurnEvent("iteration_started"))
+        entered.set()
+        await context.cancel_event.wait()
+        await channel.emit(TurnEvent("turn_done"))
+    channel.start(produce())
+    stream = channel.events()
+    await anext(stream)
+    await entered.wait()
+    await asyncio.wait_for(stream.aclose(), 1)
+    assert channel.producer.done() and channel.done.is_set()
+
 import asyncio
 
 import pytest
@@ -79,6 +153,256 @@ def runner(replies, executor=None):
     conv = Conversation()
     executor = executor or FakeExecutor()
     return TurnRunner(provider, conv, create_default_registry(), executor, Redactor(["secret-token"]))
+
+
+class LoopExecutor:
+    def __init__(self):
+        self.calls, self.closed = [], False
+    async def execute(self, slot, *, mode, cancel, emit):
+        self.calls.append(slot.call)
+        slot.execution_started = True
+        slot.result = ToolResult(slot.call.call_id, slot.call.name, "actual result")
+        return slot.result
+    async def aclose(self):
+        self.closed = True
+
+
+def loop_runner(replies, executor=None, **kwargs):
+    from weizhcode.turn_runner import _LoopRunner
+    return _LoopRunner(FakeProvider(replies), Conversation(), create_default_registry(),
+                       executor or LoopExecutor(), Redactor(["secret-token"]), **kwargs)
+
+
+async def test_loop_single_flight_natural_and_empty_response():
+    r = loop_runner([reply(), reply("")])
+    stream = r.run("hello")
+    assert r.busy
+    rejected = [e async for e in r.run("duplicate")]
+    assert rejected[0].reason == "busy" and not any(e.type == "turn_done" for e in rejected)
+    events = [e async for e in stream]
+    assert events[-1].reason == "completed" and not r.busy
+    assert len(r.provider.requests) == 1 and len(r.conversation.messages()) == 2
+    assert sum(e.type == "turn_done" for e in events) == 1
+    events = [e async for e in r.run("empty")]
+    assert events[-1].reason == "empty_response" and "未返回正文" in events[-2].text
+    assert r.conversation.messages()[-1].provider_payload["source"] == "application"
+
+
+async def test_loop_multistep_history_actual_files(tmp_path):
+    from weizhcode.models import ToolContext
+    from weizhcode.tools.executor import ToolExecutor
+    (tmp_path / "source").write_text("hello", encoding="utf-8")
+    r = loop_runner([
+        reply("read", (ToolCall("1", "read_file", '{"path":"source"}'),)),
+        reply("write", (ToolCall("2", "write_file", '{"path":"summary","content":"summary: hello"}'),)),
+        reply("check", (ToolCall("3", "read_file", '{"path":"summary"}'),)), reply("finished")],
+        ToolExecutor(create_default_registry(), ToolContext(tmp_path)))
+    events = [e async for e in r.run("read summarize check")]
+    assert events[-1].reason == "completed" and len(r.provider.requests) == 4
+    assert (tmp_path / "summary").read_text() == "summary: hello"
+    assert all(kwargs["allow_tools"] for _, kwargs in r.provider.requests)
+    assert [m.role for m in r.conversation.messages()] == ["user", "assistant", "tool", "assistant", "tool", "assistant", "tool", "assistant"]
+    assert "summary: hello" in r.provider.requests[-1][0][-1].tool_results[0].content
+    assert [e.iteration for e in events if e.type == "iteration_started"] == [1, 2, 3, 4]
+
+
+async def test_iteration_limit_boundary_exact_25_saves_last_multiple_results():
+    calls = (ToolCall("a", "read_file", '{"path":"a"}'), ToolCall("b", "read_file", '{"path":"b"}'))
+    r = loop_runner([reply("", calls) for _ in range(26)])
+    events = [e async for e in r.run("continue")]
+    assert len(r.provider.requests) == 25 and len(r.executor.calls) == 50
+    assert events[-1].reason == "max_iterations" and "25" in events[-2].text
+    assert len(r.conversation.messages()[-2].tool_results) == 2
+    assert r.conversation.messages()[-1].provider_payload["source"] == "application"
+
+
+async def test_iteration_limit_boundary_final_text_counts_and_completes():
+    call = ToolCall("a", "read_file", '{"path":"a"}')
+    r = loop_runner([reply("", (call,)) for _ in range(24)] + [reply("done")])
+    events = [e async for e in r.run("continue")]
+    assert len(r.provider.requests) == 25 and events[-1].reason == "completed"
+    assert len(r.executor.calls) == 24
+
+
+async def test_iteration_limit_boundary_cancel_wins_no_next_tool():
+    r = loop_runner([], max_iterations=1)
+    class CancelProvider:
+        async def stream_chat(self, *args, **kwargs):
+            r.cancel_current()
+            yield ProviderEvent("done", assistant_message=ChatMessage("assistant", tool_calls=(ToolCall("a", "read_file", '{"path":"a"}'),)))
+    from weizhcode.stream_collector import StreamCollector
+    r.collector = StreamCollector(CancelProvider())
+    events = [e async for e in r.run("cancel")]
+    assert events[-1].reason == "cancelled" and not r.executor.calls
+    assert r.conversation.messages()[2].tool_results[0].status == "cancelled"
+
+
+async def test_unknown_round_threshold_three_rounds_and_reset_per_task():
+    unknown = ToolCall("u", "missing", '{}')
+    r = loop_runner([reply("", (unknown,)) for _ in range(3)] + [reply("", (unknown,)), reply("ok")])
+    events = [e async for e in r.run("unknown")]
+    assert events[-1].reason == "unknown_tools" and len(r.provider.requests) == 3
+    assert not r.executor.calls
+    events = [e async for e in r.run("next")]
+    assert events[-1].reason == "completed" and len(r.provider.requests) == 5
+
+
+async def test_unknown_round_threshold_known_invalid_and_mixed_reset():
+    unknown = ToolCall("u", "missing", '{}')
+    known_bad = ToolCall("k", "read_file", '{"path":1}')
+    r = loop_runner([reply("", (unknown,)), reply("", (unknown,)), reply("", (unknown, known_bad)),
+                     reply("", (unknown,)), reply("", (unknown,)), reply("ok")])
+    events = [e async for e in r.run("reset")]
+    assert events[-1].reason == "completed" and len(r.provider.requests) == 6
+    assert not r.executor.calls
+
+
+async def test_loop_error_recovery_preserves_write_no_replay(tmp_path):
+    from weizhcode.models import ToolContext
+    from weizhcode.tools.executor import ToolExecutor
+    r = loop_runner([reply("", (ToolCall("a", "write_file", '{"path":"a","content":"written"}'),)),
+                     [ProviderEvent("error", message="secret-token failed")], reply("next")],
+                    ToolExecutor(create_default_registry(), ToolContext(tmp_path)))
+    events = [e async for e in r.run("write")]
+    assert events[-1].reason == "provider_error" and "secret-token" not in str(events)
+    assert (tmp_path / "a").read_text() == "written"
+    assert r.conversation.messages()[2].tool_results[0].status == "success"
+    events = [e async for e in r.run("next")]
+    assert events[-1].reason == "completed" and len(r.provider.requests) == 3
+    assert len([m for m in r.conversation.messages() if m.tool_results]) == 1
+
+
+async def test_loop_error_recovery_partial_call_never_executes():
+    call = ToolCall("a", "read_file", '{"path":"a"}')
+    r = loop_runner([[ProviderEvent("tool_call", tool_call=call)], reply("next")])
+    events = [e async for e in r.run("partial")]
+    assert events[-1].reason == "provider_error" and not r.executor.calls
+    assert not any(m.tool_calls for m in r.conversation.messages())
+    assert [e async for e in r.run("next")][-1].reason == "completed"
+
+
+async def test_loop_error_recovery_tool_failure_then_adjust(tmp_path):
+    from weizhcode.models import ToolContext
+    from weizhcode.tools.executor import ToolExecutor
+    r = loop_runner([reply("", (ToolCall("a", "read_file", '{"path":"missing"}'),)),
+                     reply("", (ToolCall("b", "write_file", '{"path":"a","content":"fixed"}'),)), reply("fixed")],
+                    ToolExecutor(create_default_registry(), ToolContext(tmp_path)))
+    events = [e async for e in r.run("recover")]
+    assert events[-1].reason == "completed"
+    assert r.provider.requests[1][0][-1].tool_results[0].error_code == "FILE_NOT_FOUND"
+    assert (tmp_path / "a").read_text() == "fixed"
+
+
+async def test_session_usage_settlement_once_across_user_turns():
+    from weizhcode.models import TokenUsage
+    usage = ProviderEvent("usage", usage=TokenUsage(10, 2, True, "test"))
+    r = loop_runner([[usage, usage, *reply("first")], [*reply("second")]])
+    events = [e async for e in r.run("one")]
+    assert events[-1].totals.input_tokens == 10 and events[-1].totals.output_tokens == 2
+    events = [e async for e in r.run("two")]
+    totals = events[-1].totals
+    assert totals.request_count == 2 and totals.incomplete_requests == 1
+    assert totals.input_tokens == 10 and totals.output_tokens == 2
+
+
+async def test_loop_mode_control_frozen_tools_plan_and_do(tmp_path):
+    from weizhcode.models import ToolContext
+    from weizhcode.tools.executor import ToolExecutor
+    from weizhcode.prompts import EXECUTE_DIRECTIVE
+    r = loop_runner([reply("", (ToolCall("a", "write_file", '{"path":"a","content":"x"}'),)),
+                     reply("plan"), reply("", (ToolCall("b", "write_file", '{"path":"a","content":"x"}'),)), reply("done")],
+                    ToolExecutor(create_default_registry(), ToolContext(tmp_path)))
+    assert r.set_mode("plan").type == "mode_changed" and not r.provider.requests
+    stream = r.run("plan it")
+    assert r.set_mode("normal").reason == "busy" and r.mode == "plan"
+    events = [e async for e in stream]
+    assert events[-1].reason == "completed" and not (tmp_path / "a").exists()
+    assert r.conversation.messages()[2].tool_results[0].error_code == "TOOL_NOT_ALLOWED"
+    assert all(len(kw["tools"]) == 3 for _, kw in r.provider.requests)
+    events = [e async for e in r.run(EXECUTE_DIRECTIVE, mode="normal")]
+    assert events[-1].reason == "completed" and (tmp_path / "a").read_text() == "x"
+    assert all(len(kw["tools"]) == 6 for _, kw in r.provider.requests[2:]) and r.mode == "normal"
+
+
+async def test_loop_lifecycle_reuse_cancel_and_permanent_close():
+    import asyncio
+    r = loop_runner([reply("recovered")])
+    original = r.collector
+    entered = asyncio.Event()
+    class WaitingCollector:
+        async def collect(self, *args, context, state, **kwargs):
+            entered.set()
+            await context.cancel_event.wait()
+            return None
+    r.collector = WaitingCollector()
+    async def consume():
+        return [e async for e in r.run("wait")]
+    work = asyncio.create_task(consume())
+    await entered.wait()
+    assert r.cancel_current() and r.cancel_current()
+    events = await asyncio.wait_for(work, 1)
+    assert events[-1].reason == "cancelled" and not r.busy and not r.executor.closed
+    r.collector = original
+    assert [e async for e in r.run("next")][-1].reason == "completed"
+    await r.aclose()
+    await r.aclose()
+    assert r.executor.closed and not r.cancel_current()
+    assert [e async for e in r.run("closed")][0].reason == "busy"
+
+
+async def test_loop_lifecycle_reuse_consumer_closes_waiting_stream():
+    import asyncio
+    r = loop_runner([reply("recovered")])
+    original = r.collector
+    class WaitingCollector:
+        async def collect(self, *args, context, **kwargs):
+            await context.cancel_event.wait()
+            return None
+    r.collector = WaitingCollector()
+    stream = r.run("wait")
+    assert (await anext(stream)).type == "iteration_started"
+    await asyncio.wait_for(stream.aclose(), 1)
+    assert not r.busy and not r.executor.closed
+    r.collector = original
+    assert [e async for e in r.run("next")][-1].reason == "completed"
+
+
+async def test_loop_error_recovery_cleanup_failure_stops_before_next_request():
+    class BrokenCleanup(LoopExecutor):
+        async def execute(self, slot, **kwargs):
+            result = await super().execute(slot, **kwargs)
+            slot.cleanup_error = "PROCESS_CONTROL_FAILED"
+            return result
+    r = loop_runner([reply("", (ToolCall("a", "read_file", '{"path":"a"}'),)), reply("must not request")], BrokenCleanup())
+    events = [e async for e in r.run("work")]
+    assert events[-1].reason == "internal_error" and len(r.provider.requests) == 1
+    assert r.conversation.messages()[2].tool_results[0].status == "success"
+
+
+async def test_unknown_round_threshold_known_execution_failure_resets():
+    class FailedExecutor(LoopExecutor):
+        async def execute(self, slot, **kwargs):
+            self.calls.append(slot.call)
+            slot.result = ToolResult.failure(slot.call, "FILE_NOT_FOUND", "missing")
+            return slot.result
+    unknown, known = ToolCall("u", "missing", '{}'), ToolCall("k", "read_file", '{"path":"a"}')
+    r = loop_runner([reply("", (unknown,)), reply("", (unknown,)), reply("", (known,)),
+                     reply("", (unknown,)), reply("", (unknown,)), reply("ok")], FailedExecutor())
+    assert [e async for e in r.run("reset")][-1].reason == "completed"
+    assert len(r.provider.requests) == 6 and len(r.executor.calls) == 1
+
+
+async def test_loop_lifecycle_reuse_app_close_unconsumed_full_channel():
+    import asyncio
+    r = loop_runner([[ProviderEvent("text_delta", text="x") for _ in range(500)] + reply("x" * 500)])
+    _ = r.run("stream")
+    for _ in range(3000):
+        if r._channel.queue.full():
+            break
+        await asyncio.sleep(0)
+    assert r._channel.queue.full()
+    await asyncio.wait_for(r.aclose(), 2)
+    assert not r.busy and r.executor.closed and r._task.done()
 
 
 def test_prompts_match_tools():
