@@ -3,6 +3,39 @@ from __future__ import annotations
 from weizhcode.conversation import Conversation
 
 
+def test_loop_exchange_contract_count_order_and_atomicity():
+    import pytest
+    from weizhcode.models import ChatMessage, ToolCall, ToolResult
+    conv = Conversation()
+    calls = (ToolCall("a", "read_file", '{}'), ToolCall("b", "read_file", '{}'))
+    msg = ChatMessage("assistant", tool_calls=calls)
+    for results in ([], [ToolResult("a", "read_file")],
+                    [ToolResult("b", "read_file"), ToolResult("a", "read_file")],
+                    [ToolResult("a", "wrong"), ToolResult("b", "read_file")]):
+        with pytest.raises(ValueError):
+            conv.add_tool_exchange(msg, results)
+        assert conv.messages() == []
+    conv.add_tool_exchange(msg, [ToolResult("a", "read_file"), ToolResult("b", "read_file")])
+    assert len(conv.messages()) == 2
+    invalid = ChatMessage("assistant", tool_calls=(ToolCall(None, "read_file", '{'),))
+    with pytest.raises(ValueError):
+        conv.add_tool_exchange(invalid, [])
+    assert len(conv.messages()) == 2
+
+
+def test_application_stop_notice_source_dedup_and_next_task():
+    conv = Conversation()
+    conv.add_user_message("do something")
+    conv.add_assistant_message("preamble")
+    conv.add_stop_notice("已取消，已有修改可能保留", "cancelled", run_id="a")
+    conv.add_stop_notice("已取消，已有修改可能保留", "cancelled", run_id="a")
+    assert len(conv.messages()) == 3
+    assert conv.messages()[-1].provider_payload == {"source": "application", "reason": "cancelled", "run_id": "a"}
+    conv.add_user_message("next")
+    conv.add_stop_notice("已取消", "cancelled", run_id="b")
+    assert len(conv.messages()) == 5
+
+
 def test_conversation_keeps_messages_in_order() -> None:
     conversation = Conversation()
 

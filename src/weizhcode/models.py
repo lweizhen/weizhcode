@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from copy import deepcopy
@@ -11,7 +12,49 @@ from uuid import uuid4
 
 ProtocolName = Literal["anthropic", "openai", "qwen"]
 MessageRole = Literal["user", "assistant", "tool"]
-ProviderEventType = Literal["start", "text_delta", "tool_call_start", "tool_call", "done", "error"]
+ProviderEventType = Literal["start", "text_delta", "tool_call_start", "tool_call", "done", "error", "usage"]
+AgentMode = Literal["normal", "plan"]
+StopReason = Literal["completed", "empty_response", "max_iterations", "unknown_tools",
+                     "cancelled", "provider_error", "internal_error"]
+MAX_ITERATIONS = 25
+MAX_UNKNOWN_RUN = 3
+MAX_CONCURRENT_READ_TOOLS = 4
+EVENT_QUEUE_SIZE = 128
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    complete: bool = False
+    source: str = "unknown"
+
+    def __post_init__(self) -> None:
+        for value in (self.input_tokens, self.output_tokens):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError("Token 计数须为非负整数或未知")
+        if self.complete and (self.input_tokens is None or self.output_tokens is None):
+            raise ValueError("完整统计必须包含输入和输出")
+
+
+@dataclass(frozen=True)
+class UsageTotals:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    input_requests: int = 0
+    output_requests: int = 0
+    request_count: int = 0
+    incomplete_requests: int = 0
+
+    def add(self, usage: TokenUsage) -> UsageTotals:
+        return UsageTotals(
+            self.input_tokens + (usage.input_tokens or 0),
+            self.output_tokens + (usage.output_tokens or 0),
+            self.input_requests + (usage.input_tokens is not None),
+            self.output_requests + (usage.output_tokens is not None),
+            self.request_count + 1,
+            self.incomplete_requests + (not usage.complete),
+        )
 
 
 @dataclass(frozen=True)
@@ -20,6 +63,7 @@ class ToolDefinition:
     description: str
     parameters: dict[str, object]
     requires_confirmation: bool = False
+    read_only: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", deepcopy(self.parameters))
@@ -60,7 +104,7 @@ class ToolResult:
     call_id: str | None
     tool_name: str
     content: str = ""
-    status: Literal["success", "error", "denied", "timeout"] = "success"
+    status: Literal["success", "error", "denied", "timeout", "cancelled"] = "success"
     error_code: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     truncated: bool = False
@@ -74,7 +118,7 @@ class ToolResult:
 
     @classmethod
     def failure(cls, call: ToolCall, code: str, message: str, **metadata: object) -> ToolResult:
-        status = {"USER_DENIED": "denied", "TOOL_TIMEOUT": "timeout"}.get(code, "error")
+        status = {"USER_DENIED": "denied", "TOOL_TIMEOUT": "timeout", "TOOL_CANCELLED": "cancelled"}.get(code, "error")
         return cls(call.call_id, call.name, message, status, code, metadata)  # type: ignore[arg-type]
 
     def to_model_text(self, max_chars: int = 20_000) -> str:
@@ -205,6 +249,7 @@ class ProviderEvent:
     message: str = ""
     tool_call: ToolCall | None = None
     assistant_message: ChatMessage | None = None
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -216,4 +261,77 @@ class TurnEvent:
     tool_call: ToolCall | None = None
     approval: ApprovalRequest | None = None
     result: ToolResult | None = None
+    run_id: str = ""
+    request_id: str = ""
+    iteration: int = 0
+    index: int = 0
+    mode: AgentMode = "normal"
+    max_iterations: int = MAX_ITERATIONS
+    reason: str = ""
+    usage: TokenUsage | None = None
+    totals: UsageTotals | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tool_call", deepcopy(self.tool_call))
+        object.__setattr__(self, "result", deepcopy(self.result))
+
+
+@dataclass
+class ToolSlot:
+    index: int
+    call: ToolCall
+    local_id: str = ""
+    phase: Literal["pending", "preparing", "running", "finished"] = "pending"
+    execution_started: bool = False
+    result: ToolResult | None = None
+    cleanup_error: str = ""
+
+    def __post_init__(self) -> None:
+        self.call = deepcopy(self.call)
+        if not self.local_id:
+            self.local_id = self.call.local_id
+
+
+@dataclass
+class StreamState:
+    request_id: str = field(default_factory=lambda: uuid4().hex)
+    iteration: int = 0
+    assistant_message: ChatMessage | None = None
+    completed: bool = False
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    pending_ids: list[str] = field(default_factory=list)
+    text: str = ""
+    error: str = ""
+    cancelled: bool = False
+
+
+@dataclass(frozen=True)
+class RoundResponse:
+    request_id: str
+    iteration: int
+    assistant_message: ChatMessage
+    usage: TokenUsage
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "assistant_message", deepcopy(self.assistant_message))
+
+
+@dataclass
+class RunContext:
+    mode: AgentMode = "normal"
+    run_id: str = field(default_factory=lambda: uuid4().hex)
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    consumer_closed: asyncio.Event = field(default_factory=asyncio.Event)
+    iteration: int = 0
+    unknown_run: int = 0
+    stream: StreamState | None = None
+    slots: list[ToolSlot] = field(default_factory=list)
+    exchange_committed: bool = False
+    owned_tasks: set[asyncio.Task] = field(default_factory=set)
+    cleanup_tasks: set[asyncio.Task] = field(default_factory=set)
+
+    def __setattr__(self, name, value):
+        if name == "mode" and hasattr(self, "mode") and "mode" in self.__dict__:
+            raise AttributeError("任务模式已经冻结")
+        super().__setattr__(name, value)
 

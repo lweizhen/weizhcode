@@ -14,6 +14,31 @@ from weizhcode.tools import create_default_registry
 from weizhcode.redaction import Redactor
 
 
+@pytest.mark.parametrize("protocol", ["anthropic", "openai", "qwen"])
+async def test_mixed_diagnostic_preserves_executed_facts(protocol):
+    from weizhcode.models import ToolCall
+    requests = []
+    provider = make_provider(protocol, [], requests)
+    good = ToolCall("good", "read_file", '{}')
+    bad = ToolCall(None, "missing", '{')
+    assistant = ChatMessage("assistant", "preamble", tool_calls=(good, bad), provider_payload={
+        "execution_facts": [{"execution_started": True, "cleanup_error": ""},
+                            {"execution_started": False, "cleanup_error": ""}]})
+    conv = Conversation()
+    conv.add_user_message("test")
+    conv.add_tool_exchange(assistant, [ToolResult("good", "read_file", "actual-success secret-token"),
+                                     ToolResult.failure(bad, "UNKNOWN_TOOL", "missing")])
+    saved = conv.messages()
+    assert saved[1].provider_payload["execution_facts"][0]["execution_started"] is True
+    saved[1].provider_payload["execution_facts"][0]["execution_started"] = False
+    assert conv.messages()[1].provider_payload["execution_facts"][0]["execution_started"] is True
+    _ = [event async for event in provider.stream_chat(conv.messages())]
+    text = json.dumps(requests[0], ensure_ascii=False)
+    assert "actual-success" in text and "UNKNOWN_TOOL" in text
+    assert "未执行，仅用于诊断" not in text
+    assert "secret-token" not in text
+
+
 def tool_events(protocol, raw='{"path":"中文.txt"}', *, count=1):
     if protocol == "anthropic":
         events = []

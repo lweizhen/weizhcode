@@ -27,6 +27,11 @@ class Conversation:
     def add_tool_exchange(self, assistant: ChatMessage, results: list[ToolResult]) -> None:
         if assistant.role != "assistant" or not assistant.tool_calls:
             raise ValueError("工具交换必须包含助手调用")
+        if len(assistant.tool_calls) != len(results):
+            raise ValueError("工具调用与结果数量不对应")
+        if any(call.call_id != result.call_id or call.name != result.tool_name
+               for call, result in zip(assistant.tool_calls, results)):
+            raise ValueError("工具调用与结果顺序或标识不对应")
         diagnostic = not wire_calls_valid(assistant.tool_calls) or any(r.error_code == "UNKNOWN_TOOL" for r in results)
         if not diagnostic:
             expected = [call.call_id for call in assistant.tool_calls]
@@ -38,4 +43,10 @@ class Conversation:
             replace(assistant, provider_payload=payload),
             ChatMessage("tool", tool_results=tuple(results), provider_payload={"diagnostic": diagnostic}),
         ]))
+
+    def add_stop_notice(self, text: str, reason: str, *, run_id: str = "") -> None:
+        payload = {"source": "application", "reason": reason, "run_id": run_id}
+        if self._messages and self._messages[-1].provider_payload == payload:
+            return
+        self._messages.append(ChatMessage("assistant", text, provider_payload=payload))
 

@@ -11,7 +11,7 @@ class ReadFileTool(BaseTool):
         "path": TEXT,
         "start_line": {"type": "integer", "minimum": 1, "default": 1},
         "line_count": {"type": "integer", "minimum": 1, "maximum": MAX_READ_LINES, "default": MAX_READ_LINES},
-    }, ["path"]))
+    }, ["path"]), read_only=True)
 
     def _prepare(self, call, context):
         args = dict(call.arguments or {})

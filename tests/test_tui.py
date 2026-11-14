@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+
+def test_loop_event_contract_correlation_and_copies():
+    from weizhcode.models import ToolCall, ToolResult, TokenUsage, TurnEvent, UsageTotals
+    call = ToolCall("id", "read_file", '{}', {"path": "a"})
+    result = ToolResult("id", "read_file", "ok", metadata={"lines": [1]})
+    event = TurnEvent("tool_result", run_id="run", request_id="req", iteration=2,
+                      local_id=call.local_id, tool_call=call, result=result,
+                      mode="plan", usage=TokenUsage(0, 2, True), totals=UsageTotals())
+    call.arguments["path"] = "changed"
+    result.metadata["lines"].clear()
+    assert event.tool_call.arguments == {"path": "a"}
+    assert event.result.metadata == {"lines": [1]}
+    assert (event.run_id, event.request_id, event.iteration, event.mode) == ("run", "req", 2, "plan")
+    assert ToolCall("id2", "read_file", '{}').local_id != event.local_id
+
 from collections.abc import AsyncIterator
 
 from weizhcode.conversation import Conversation

@@ -16,6 +16,28 @@ from weizhcode.providers.sse import SSEEvent, parse_sse_lines
 from weizhcode.models import ChatMessage
 
 
+@pytest.mark.parametrize("value", [-1, True, 1.5, "2"])
+def test_usage_contract_rejects_invalid_counts(value):
+    from weizhcode.models import TokenUsage
+    with pytest.raises(ValueError):
+        TokenUsage(input_tokens=value)
+
+
+def test_usage_contract_known_zero_partial_and_immutable():
+    from dataclasses import FrozenInstanceError
+    from weizhcode.models import TokenUsage, UsageTotals
+    zero, partial = TokenUsage(0, 0, True, "test"), TokenUsage(5, None, False, "test")
+    totals = UsageTotals().add(zero).add(partial)
+    assert (totals.input_tokens, totals.output_tokens) == (5, 0)
+    assert (totals.input_requests, totals.output_requests) == (2, 1)
+    assert (totals.request_count, totals.incomplete_requests) == (2, 1)
+    assert UsageTotals().input_requests == 0
+    with pytest.raises(FrozenInstanceError):
+        zero.input_tokens = 4
+    with pytest.raises(ValueError):
+        TokenUsage(None, 0, True)
+
+
 def provider_config(protocol: str = "openai") -> ProviderConfig:
     return ProviderConfig(
         name="demo",

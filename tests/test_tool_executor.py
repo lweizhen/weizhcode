@@ -1,5 +1,21 @@
 from pathlib import Path
 
+
+def test_tool_slot_contract_isolation_and_cancel_budget():
+    from weizhcode.models import ToolCall, ToolResult, ToolSlot
+    call = ToolCall("a", "read_file", '{}', {"path": "a"})
+    first, second = ToolSlot(0, call), ToolSlot(1, ToolCall("b", "read_file", '{}'))
+    call.arguments["path"] = "changed"
+    assert first.call.arguments == {"path": "a"}
+    assert first.local_id != second.local_id
+    assert first.phase == "pending" and not first.execution_started
+    first.execution_started = True
+    first.result = ToolResult("a", "read_file", "confirmed")
+    second.result = ToolResult.failure(second.call, "TOOL_CANCELLED", "未执行" * 30000)
+    assert first.result.status == "success"
+    assert second.result.status == "cancelled" and second.result.is_error
+    assert len(second.result.to_model_text()) <= 20000
+
 from weizhcode.models import PreparedOperation, PreparedOperationPreview, ToolCall, ToolContext, ToolResult
 
 

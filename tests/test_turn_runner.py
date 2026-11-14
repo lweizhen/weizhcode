@@ -1,5 +1,33 @@
 from __future__ import annotations
 
+
+def test_run_context_contract_isolation_and_frozen_mode():
+    import pytest
+    from weizhcode.models import MAX_ITERATIONS, MAX_UNKNOWN_RUN, RunContext, StreamState, RoundResponse, ChatMessage, TokenUsage
+    first, second = RunContext(mode="plan"), RunContext()
+    assert first.run_id != second.run_id and first.cancel_event is not second.cancel_event
+    assert first.slots is not second.slots
+    assert first.iteration == first.unknown_run == 0
+    assert (MAX_ITERATIONS, MAX_UNKNOWN_RUN) == (25, 3)
+    first.cancel_event.set()
+    assert not second.cancel_event.is_set()
+    with pytest.raises(AttributeError):
+        first.mode = "normal"
+    a, b = StreamState(), StreamState()
+    assert a.request_id != b.request_id
+    msg = ChatMessage("assistant", "ok", provider_payload={"items": ["opaque"]})
+    response = RoundResponse(a.request_id, 1, msg, TokenUsage())
+    msg.provider_payload["items"].clear()
+    assert response.assistant_message.provider_payload["items"] == ["opaque"]
+
+
+def test_loop_prompts_cover_plan_and_execution():
+    from weizhcode.prompts import LOOP_SYSTEM_PROMPT, PLAN_MODE_REMINDER, EXECUTE_DIRECTIVE
+    assert "持续" in LOOP_SYSTEM_PROMPT and "数据" in LOOP_SYSTEM_PROMPT
+    assert "不需要逐次审批" in LOOP_SYSTEM_PROMPT
+    assert "禁止" in PLAN_MODE_REMINDER and "/do" in PLAN_MODE_REMINDER
+    assert EXECUTE_DIRECTIVE == "请按上面的计划开始执行。"
+
 import asyncio
 
 import pytest

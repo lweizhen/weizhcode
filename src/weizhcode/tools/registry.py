@@ -32,8 +32,13 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def definitions(self) -> list[ToolDefinition]:
-        return deepcopy([tool.definition for tool in self._tools.values()])
+    def definitions(self, *, read_only: bool = False) -> list[ToolDefinition]:
+        return deepcopy([tool.definition for tool in self._tools.values()
+                         if not read_only or tool.definition.read_only is True])
+
+    def is_read_only(self, name: str) -> bool:
+        tool = self.get(name)
+        return tool is not None and tool.definition.read_only is True
 
     def validate(self, call: ToolCall) -> ToolCall | ToolResult:
         if not call.call_id or len(call.call_id) > 512:
