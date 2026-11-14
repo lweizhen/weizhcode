@@ -29,6 +29,58 @@ def app_for(tmp_path, replies, *, secrets=(), timeout=30):
                         project_path=str(tmp_path), version="0.1.0", runner=runner, redactor=safe)
 
 
+@pytest.mark.parametrize("answer,expected", [("1", "本地使用"), ("还需要离线使用", "还需要离线使用")])
+async def test_ask_question_ui_answer_and_busy_commands(tmp_path, answer, expected):
+    call = ToolCall("q", "AskUserQuestion", json.dumps({"question":"使用范围？", "options":["本地使用","团队使用"]}))
+    app = app_for(tmp_path, [reply("", (call,)), reply("已确认范围，等待 /do")], timeout=.001)
+    app.runner.set_mode("plan")
+    async with app.run_test() as pilot:
+        await app.submit_text("制定计划")
+        app.query_one(ChatInput).text = "保留草稿"
+        await wait_for(pilot, lambda: app._pending_question is not None)
+        assert app.query_one(ChatInput).text == "保留草稿"
+        assert len(app.provider.requests) == 1
+        for value in ("/do", "9", "x"*4001, "9"*5000):
+            await app.submit_text(value)
+            assert app._pending_question is not None
+        assert app.query_one(ChatInput).text == "保留草稿" and app.runner.mode == "plan"
+        await app.submit_text(answer)
+        await wait_for(pilot, lambda: not app.is_generating)
+        assert app.query_one(ChatInput).text == ""
+        assert json.loads(app.conversation.messages()[2].tool_results[0].content)["answer"] == expected
+        assert app.conversation.messages()[-1].content == "已确认范围，等待 /do"
+        assert not app.runner.executor._active
+
+
+async def test_ask_question_ui_cancel_then_new_question(tmp_path):
+    call = ToolCall("q", "AskUserQuestion", '{"question":"范围？"}')
+    app = app_for(tmp_path, [reply("", (call,)), reply("", (call,)), reply("新计划")])
+    app.runner.set_mode("plan")
+    async with app.run_test() as pilot:
+        await app.submit_text("first")
+        await wait_for(pilot, lambda: app._pending_question is not None)
+        old_id, old_run = app._pending_question.question_id, app._active_run_id
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: not app.is_generating)
+        await app.submit_text("next")
+        await wait_for(pilot, lambda: app._pending_question is not None)
+        assert not app.runner.submit_answer(old_run, old_id, {"text":"late"})[0]
+        await app.submit_text("新范围")
+        await wait_for(pilot, lambda: not app.is_generating)
+        assert app.conversation.messages()[-1].content == "新计划"
+
+
+async def test_ask_question_ui_exit_while_waiting(tmp_path):
+    app = app_for(tmp_path, [reply("", (ToolCall("q", "AskUserQuestion", '{"question":"范围？"}'),))])
+    app.runner.set_mode("plan")
+    async with app.run_test() as pilot:
+        await app.submit_text("plan")
+        await wait_for(pilot, lambda: app._pending_question is not None)
+        await app.submit_text("/exit")
+        assert not app.runner.busy and app.runner.questions._pending is None
+        assert app.runner.questions._closed and not app.runner.executor._active
+
+
 async def wait_for(pilot, predicate):
     for _ in range(80):
         if predicate():
@@ -108,7 +160,7 @@ async def test_loop_mode_usage_ui_snapshots_and_do(tmp_path):
         await app.submit_text("plan task")
         await wait_for(pilot, lambda: not app.is_generating)
         status = str(app.query_one("#status", Static).render())
-        assert "Plan" in status and "↑10 ↓2" in status and "6 tools" in status
+        assert "Plan" in status and "↑10 ↓2" in status and "7 tools" in status
         await app.submit_text("/do")
         await wait_for(pilot, lambda: not app.is_generating)
         assert app.runner.mode == "normal" and len(app.provider.requests) == 2
@@ -312,7 +364,7 @@ async def test_turn_event_ui_immediate_double_submit(tmp_path):
         await wait_for(pilot, lambda: not app.is_generating)
         assert len(app.provider.requests) == 1
         assert sum(m.role == "user" for m in app.conversation.messages()) == 1
-        assert "6 tools registered" in str(app.query_one("#status", Static).render())
+        assert "7 tools registered" in str(app.query_one("#status", Static).render())
 
 
 

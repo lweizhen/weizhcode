@@ -27,6 +27,34 @@ def loop_tool_events(protocol, name, args, prefix):
     return [transform(p) for p in packets]
 
 
+@pytest.mark.parametrize("protocol", ["anthropic", "openai", "qwen"])
+async def test_ask_question_protocol_roundtrip(tmp_path, protocol):
+    scripts = [loop_tool_events(protocol, "AskUserQuestion", {"question":"部署范围？", "options":["本地","团队"]}, "q"),
+               text_events(protocol, "确认本地使用，等待 /do")]
+    requests = []
+    provider = make_provider(protocol, [])
+    async def stream(*args, **kwargs):
+        requests.append(kwargs["json_body"])
+        for packet in scripts.pop(0):
+            yield SSEEvent(None, packet if isinstance(packet, str) else json.dumps(packet))
+    provider._stream = stream
+    registry, conv = create_default_registry(), Conversation()
+    runner = TurnRunner(provider, conv, registry, ToolExecutor(registry, ToolContext(tmp_path)))
+    token = runner.bind_questions()
+    runner.set_mode("plan")
+    try:
+        async for event in runner.run("计划"):
+            if event.type == "question_request":
+                assert runner.submit_answer(event.run_id, event.question.question_id, {"option_index":0})[0]
+        assert len(requests) == 2
+        assert "本地" in json.dumps(requests[-1], ensure_ascii=False)
+        assert conv.messages()[-1].content == "确认本地使用，等待 /do"
+        assert not list(tmp_path.iterdir())
+    finally:
+        runner.unbind_questions(token)
+        await runner.aclose()
+
+
 def add_usage(protocol, script):
     import copy
     script = copy.deepcopy(script)

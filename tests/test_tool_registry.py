@@ -16,7 +16,7 @@ class SampleTool:
 def test_readonly_classification_all_six_explicit():
     from weizhcode.tools import create_default_registry
     definitions = create_default_registry().definitions()
-    assert {d.name for d in definitions if d.read_only is True} == {"read_file", "find_files", "search_content"}
+    assert {d.name for d in definitions if d.read_only is True} == {"read_file", "find_files", "search_content", "AskUserQuestion"}
     assert {d.name for d in definitions if d.read_only is False} == {"write_file", "edit_file", "run_command"}
     assert ToolDefinition("default", "", {}).read_only is False
 
@@ -24,9 +24,9 @@ def test_readonly_classification_all_six_explicit():
 def test_readonly_registry_exact_filter_order_and_copy():
     from weizhcode.tools import create_default_registry
     registry = create_default_registry()
-    assert len(registry.definitions()) == 6
+    assert len(registry.definitions()) == 7
     readonly = registry.definitions(read_only=True)
-    assert [d.name for d in readonly] == ["read_file", "find_files", "search_content"]
+    assert [d.name for d in readonly] == ["read_file", "find_files", "search_content", "AskUserQuestion"]
     assert not registry.is_read_only("missing")
     readonly[0].parameters.clear()
     assert registry.definitions(read_only=True)[0].parameters
@@ -34,7 +34,7 @@ def test_readonly_registry_exact_filter_order_and_copy():
         definition = ToolDefinition("pretend", "", {"type": "object"}, read_only="true")
     registry.register(PretendReadOnly())
     assert not registry.is_read_only("pretend")
-    assert len(registry.definitions(read_only=True)) == 3
+    assert len(registry.definitions(read_only=True)) == 4
 
 
 def test_model_contract_copies_inputs():
@@ -109,6 +109,6 @@ def test_default_registry_six_order_and_permissions():
     from weizhcode.tools import create_default_registry
     registry = create_default_registry()
     definitions = registry.definitions()
-    assert [d.name for d in definitions] == ["read_file", "write_file", "edit_file", "run_command", "find_files", "search_content"]
+    assert [d.name for d in definitions] == ["read_file", "write_file", "edit_file", "run_command", "find_files", "search_content", "AskUserQuestion"]
     assert {d.name for d in definitions if d.read_only is False} == {"write_file", "edit_file", "run_command"}
     assert all(registry.get(d.name) is not None for d in definitions)

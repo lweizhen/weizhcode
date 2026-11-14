@@ -41,6 +41,14 @@ class ToolRegistry:
         tool = self.get(name)
         return tool is not None and tool.definition.read_only is True
 
+    def definitions_for_mode(self, mode):
+        return [d for d in self.definitions() if
+                (d.read_only is True if mode == "plan" else d.execution_kind == "worker")]
+
+    def is_parallel_read(self, name):
+        tool = self.get(name)
+        return self.is_read_only(name) and tool.definition.execution_kind == "worker"
+
     def validate(self, call: ToolCall) -> ToolCall | ToolResult:
         if not isinstance(call.call_id, str) or not call.call_id or len(call.call_id) > 512:
             return ToolResult.failure(call, "INVALID_ARGUMENTS", "缺少或非法工具调用 ID")

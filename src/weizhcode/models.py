@@ -63,6 +63,7 @@ class ToolDefinition:
     description: str
     parameters: dict[str, object]
     read_only: bool = False
+    execution_kind: Literal["worker", "interactive"] = "worker"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", deepcopy(self.parameters))
@@ -239,6 +240,16 @@ class ProviderEvent:
 
 
 @dataclass(frozen=True)
+class QuestionRequest:
+    question_id: str
+    question: str
+    options: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "options", tuple(self.options))
+
+
+@dataclass(frozen=True)
 class TurnEvent:
     type: str
     text: str = ""
@@ -254,6 +265,7 @@ class TurnEvent:
     reason: str = ""
     usage: TokenUsage | None = None
     totals: UsageTotals | None = None
+    question: QuestionRequest | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_call", deepcopy(self.tool_call))

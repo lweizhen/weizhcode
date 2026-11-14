@@ -323,7 +323,7 @@ async def test_loop_mode_control_frozen_tools_plan_and_do(tmp_path):
     events = [e async for e in stream]
     assert events[-1].reason == "completed" and not (tmp_path / "a").exists()
     assert r.conversation.messages()[2].tool_results[0].error_code == "TOOL_NOT_ALLOWED"
-    assert all(len(kw["tools"]) == 3 for _, kw in r.provider.requests)
+    assert all(len(kw["tools"]) == 4 for _, kw in r.provider.requests)
     events = [e async for e in r.run(EXECUTE_DIRECTIVE, mode="normal")]
     assert events[-1].reason == "completed" and (tmp_path / "a").read_text() == "x"
     assert all(len(kw["tools"]) == 6 for _, kw in r.provider.requests[2:]) and r.mode == "normal"
@@ -441,7 +441,9 @@ async def test_loop_budget_context_large_result_and_no_history_trim(tmp_path):
 
 
 def test_prompts_match_tools():
-    assert all(t.name in SYSTEM_PROMPT for t in create_default_registry().definitions())
+    from weizhcode.prompts import PLAN_MODE_REMINDER
+    assert all(t.name in SYSTEM_PROMPT for t in create_default_registry().definitions_for_mode("normal"))
+    assert "AskUserQuestion" in PLAN_MODE_REMINDER
     assert "持续" in SYSTEM_PROMPT
 
 

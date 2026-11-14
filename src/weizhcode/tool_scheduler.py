@@ -76,8 +76,8 @@ class ToolScheduler:
         try:
             while position < len(slots) and not context.cancel_event.is_set():
                 end = position + 1
-                if slots[position].result is None and self.registry.is_read_only(slots[position].call.name):
-                    while end < len(slots) and slots[end].result is None and self.registry.is_read_only(slots[end].call.name):
+                if slots[position].result is None and self.registry.is_parallel_read(slots[position].call.name):
+                    while end < len(slots) and slots[end].result is None and self.registry.is_parallel_read(slots[end].call.name):
                         end += 1
                 batch = slots[position:end]
                 for slot in batch:

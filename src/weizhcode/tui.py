@@ -28,7 +28,7 @@ from weizhcode.tool_ui import ToolCallView
 LOGO = r""" /\_/\ 
 ( o.o )
  > ^ <"""
-STATUS_TEXT = "Connected to 0 MCP server(s), 6 tools registered"
+STATUS_TEXT = "Connected to 0 MCP server(s), 7 tools registered"
 
 
 @dataclass(frozen=True)
@@ -288,6 +288,9 @@ class WeizhCodeApp(App[None]):
         self._active_tools = {}
         self._started_at = None
         self._cancel_requested = False
+        self._pending_question = None
+        self._question_view = None
+        self._question_connection = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
@@ -308,6 +311,8 @@ class WeizhCodeApp(App[None]):
 
     def on_mount(self):
         self.query_one(ChatInput).focus()
+        if hasattr(self.runner, "bind_questions"):
+            self._question_connection = self.runner.bind_questions()
         self.set_interval(.1, self._update_status)
         self._update_status()
 
@@ -326,6 +331,8 @@ class WeizhCodeApp(App[None]):
             progress = f"Iteration {self._iteration}/{self._max_iterations}"
             if self._cancel_requested:
                 progress += " · 正在取消并清理…"
+            elif self._pending_question is not None:
+                progress += " · 等待你的回答…"
             elif self._active_tools:
                 progress += " · " + ", ".join(list(self._active_tools.values())[:4])
             else:
@@ -346,6 +353,24 @@ class WeizhCodeApp(App[None]):
             return
         if content in {"/exit", "/quit"}:
             await self.action_quit()
+            return
+        if self._pending_question is not None:
+            if content in {"/plan", "/do"}:
+                await self._append_message("notice", "请先回答当前问题，或按 Esc 取消任务；草稿已保留。")
+                return
+            request = self._pending_question
+            answer = ({"option_index": int(content)-1 if len(content) <= 8 else -1}
+                      if request.options and content.isascii() and content.isdecimal() else {"text": content})
+            accepted, message = self.runner.submit_answer(self._active_run_id, request.question_id, answer)
+            if not accepted:
+                await self._append_message("notice", message)
+                return
+            displayed = request.options[answer["option_index"]] if "option_index" in answer else content
+            if self._question_view is not None:
+                self._question_view.append_text("\n回答：" + self.redactor.display(displayed))
+            self._pending_question = self._question_view = None
+            self.query_one(ChatInput).clear_text()
+            self._update_status()
             return
         if self.is_generating or self.runner.busy:
             return
@@ -401,7 +426,18 @@ class WeizhCodeApp(App[None]):
             self._active_run_id = event.run_id
         if event.run_id != self._active_run_id:
             return
-        if event.type == "iteration_started":
+        if event.type == "question_request" and event.question is not None:
+            self._pending_question = event.question
+            view = self._tool_views.get((event.run_id, event.local_id))
+            if view is not None:
+                view.set_state("等待回答…")
+            lines = ["? " + event.question.question]
+            lines.extend(f"  {i+1}. {option}" for i, option in enumerate(event.question.options))
+            lines.append("输入选项序号或直接输入回答；Esc 取消当前任务。" if event.question.options
+                         else "请输入回答；Esc 取消当前任务。")
+            self._question_view = await self._append_message("notice", self.redactor.display("\n".join(lines)))
+            self._text_view = self._text_key = None
+        elif event.type == "iteration_started":
             self._mode, self._iteration = event.mode, event.iteration
             self._max_iterations = event.max_iterations
             self._text_view = self._text_key = None
@@ -434,8 +470,11 @@ class WeizhCodeApp(App[None]):
                 self._text_view.append_text("\n[本次回复未完成]")
             await self.show_error(event.text)
         elif event.type == "turn_done":
+            if self._pending_question is not None and self._question_view is not None:
+                self._question_view.append_text("\n[提问已结束，未收到回答]")
+            self._pending_question = self._question_view = None
             for view in self._tool_views.values():
-                if view.state in {"Receiving…", "Queued…", "Preparing…", "Running…"}:
+                if view.state in {"Receiving…", "Queued…", "Preparing…", "Running…", "等待回答…"}:
                     view.set_state("未执行：响应未完成/已取消" if view.state != "Running…" else "已停止，结果未确认")
             if event.totals is not None:
                 self._totals = event.totals
@@ -477,6 +516,9 @@ class WeizhCodeApp(App[None]):
 
     async def _shutdown_tools(self):
         self._tools_closing = True
+        if self._question_connection is not None:
+            self.runner.unbind_questions(self._question_connection)
+            self._question_connection = None
         await self.runner.aclose()
         for view in self._tool_views.values():
             view.invalidate()

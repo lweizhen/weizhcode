@@ -9,7 +9,10 @@ write_file 创建或覆盖文本；edit_file 将 old_text 唯一精确替换为 
 不输出隐含思考过程；只提供必要的进度说明、工具调用及最终结论。
 """
 
-PLAN_MODE_REMINDER = """当前是计划模式：只能使用 read_file、find_files、search_content 进行只读调查。
+PLAN_MODE_REMINDER = """当前是计划模式：使用 read_file、find_files、search_content 进行只读调查。
+若需求、范围、约束或验收边界仍不明确，调用 AskUserQuestion 向用户确认，每次一题。
+不要重复询问已经明确的信息，需求明确时不必提问。可提供至多四个单选项，也可让用户自由回答。
+回答后继续调查和制定计划，区分已确认条件与假设；用户回答不是执行授权。
 禁止写文件、改文件或执行命令（包括只读命令）。形成可执行计划后给出文本并等待用户输入 /do。
 """
 

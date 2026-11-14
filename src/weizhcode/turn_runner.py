@@ -50,6 +50,9 @@ class _EventChannel:
             result = ToolResult(**json.loads(result.to_model_text()))
         return replace(event, text=self.redactor.display(event.text), reason=self.redactor.display(event.reason),
                        tool_call=call, result=result,
+                       question=replace(event.question, question=self.redactor.display(event.question.question),
+                                        options=tuple(self.redactor.display(s) for s in event.question.options))
+                       if event.question else None,
                        usage=replace(event.usage, source=self.redactor.display(event.usage.source))
                        if event.usage else None)
 
@@ -125,7 +128,7 @@ class TurnRunner:
 
     def __init__(self, provider, conversation, registry, executor, redactor=None, *,
                  collector=None, scheduler=None, max_iterations=MAX_ITERATIONS,
-                 max_unknown_run=MAX_UNKNOWN_RUN, system_prompt=None):
+                 max_unknown_run=MAX_UNKNOWN_RUN, system_prompt=None, questions=None):
         from weizhcode.prompts import SYSTEM_PROMPT
         from weizhcode.stream_collector import StreamCollector
         from weizhcode.tool_scheduler import ToolScheduler
@@ -136,6 +139,12 @@ class TurnRunner:
         self.redactor = redactor or Redactor()
         self.collector = collector or StreamCollector(provider, self.redactor)
         self.scheduler = scheduler or ToolScheduler(registry, executor)
+        from weizhcode.user_questions import QuestionBroker
+        existing = getattr(executor, "questions", None)
+        if questions is not None and existing is not None and questions is not existing:
+            raise ValueError("交互通道注入不一致")
+        self.questions = questions or existing or QuestionBroker()
+        executor.questions = self.questions
         self.max_iterations, self.max_unknown_run = max_iterations, max_unknown_run
         self.system_prompt = SYSTEM_PROMPT if system_prompt is None else system_prompt
         self.mode = "normal"
@@ -172,6 +181,17 @@ class TurnRunner:
         self._context.cancel_event.set()
         return True
 
+    def bind_questions(self):
+        return self.questions.connect()
+
+    def unbind_questions(self, token):
+        self.questions.disconnect(token)
+
+    def submit_answer(self, run_id, question_id, answer):
+        if self._context is None or self._context.run_id != run_id or self._context.cancel_event.is_set():
+            return False, "问题不属于当前任务或任务已取消"
+        return self.questions.submit(question_id, answer)
+
     async def aclose(self):
         if self._close_task is None:
             self._closed = True
@@ -181,6 +201,7 @@ class TurnRunner:
                     self._context.consumer_closed.set()
                 if self._task is not None:
                     await asyncio.gather(self._task, return_exceptions=True)
+                self.questions.close()
                 await self.executor.aclose()
             self._close_task = asyncio.create_task(close())
         await asyncio.shield(self._close_task)
@@ -232,7 +253,7 @@ class TurnRunner:
                 prompt = self.system_prompt + ("\n" + PLAN_MODE_REMINDER if context.mode == "plan" else "")
                 try:
                     response = await self.collector.collect(self.conversation.messages(),
-                        tools=self.registry.definitions(read_only=context.mode == "plan"), system_prompt=prompt,
+                        tools=self.registry.definitions_for_mode(context.mode), system_prompt=prompt,
                         context=context, state=state, emit=emit)
                 finally:
                     if state.request_id not in self._settled:

@@ -119,7 +119,7 @@ async def test_stream_tool_fragments_and_roundtrip(protocol, count):
     assert len(calls) == count
     assert all(c.arguments == {"path": "中文.txt"} for c in calls)
     assert len({c.local_id for c in calls}) == count
-    assert len(requests[0]["tools"]) == 6
+    assert len(requests[0]["tools"]) == 7
     assert requests[0]["tool_choice"] == ({"type": "auto"} if protocol == "anthropic" else "auto")
     conv = Conversation()
     conv.add_user_message("read")

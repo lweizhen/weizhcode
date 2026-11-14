@@ -75,7 +75,7 @@ def test_startup_tools_cli_constructs_all_components(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "WeizhCodeApp", App)
     cli.main()
     assert captured["ran"]
-    assert len(captured["runner"].registry.definitions()) == 6
+    assert len(captured["runner"].registry.definitions()) == 7
     assert captured["runner"].conversation is captured["conversation"]
     assert captured["redactor"].secrets == ("active-key",)
 

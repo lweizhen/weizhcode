@@ -68,5 +68,5 @@ class ToolCallView(Vertical):
         self.set_state(label + ("\n" + self.summary if self.summary else ""))
 
     def invalidate(self):
-        if self.state in {"Receiving…", "Queued…", "Preparing…", "Running…"}:
+        if self.state in {"Receiving…", "Queued…", "Preparing…", "Running…", "等待回答…"}:
             self.set_state("已停止，状态以实际结果为准")

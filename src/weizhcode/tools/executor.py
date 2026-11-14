@@ -13,12 +13,13 @@ from weizhcode.tools.process import ManagedWorker
 
 class ToolExecutor:
     def __init__(self, registry, context: ToolContext, redactor: Redactor | None = None, *,
-                 timeout=TOOL_TIMEOUT_SECONDS, worker_factory=ManagedWorker):
+                 timeout=TOOL_TIMEOUT_SECONDS, worker_factory=ManagedWorker, questions=None):
         self.registry, self.context = registry, context
         self.redactor = redactor or Redactor()
         self.timeout, self.worker_factory = timeout, worker_factory
         self._active = set()
         self._closed = False
+        self.questions = questions
 
     async def execute(self, slot, *, mode, cancel, emit):
         call = slot.call
@@ -45,6 +46,16 @@ class ToolExecutor:
             return save(ToolResult.failure(call, "TOOL_NOT_ALLOWED", "计划模式只允许读文件、找文件和搜索内容"))
         call = validated
         slot.call = validated
+        if self.registry.get(call.name).definition.execution_kind == "interactive":
+            if mode != "plan":
+                slot.phase = "finished"
+                return save(ToolResult.failure(call, "TOOL_NOT_ALLOWED", "用户提问仅限计划模式"))
+            try:
+                if self.questions is None:
+                    return save(ToolResult.failure(call, "INTERACTION_UNAVAILABLE", "没有用户交互通道"))
+                return save(await self.questions.ask(slot, cancel=cancel, emit=emit))
+            finally:
+                slot.phase = "finished"
         try:
             worker = self.worker_factory()
         except Exception as exc:
@@ -138,5 +149,7 @@ class ToolExecutor:
 
     async def aclose(self):
         self._closed = True
+        if self.questions is not None:
+            self.questions.close()
         await asyncio.gather(*(worker.aclose() for worker in tuple(self._active)))
 

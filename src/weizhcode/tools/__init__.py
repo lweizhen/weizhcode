@@ -9,8 +9,9 @@ def create_default_registry():
     from weizhcode.tools.run_command import RunCommandTool
     from weizhcode.tools.find_files import FindFilesTool
     from weizhcode.tools.search_content import SearchContentTool
+    from weizhcode.tools.ask_user_question import AskUserQuestionTool
 
     registry = ToolRegistry()
-    for tool_type in (ReadFileTool, WriteFileTool, EditFileTool, RunCommandTool, FindFilesTool, SearchContentTool):
+    for tool_type in (ReadFileTool, WriteFileTool, EditFileTool, RunCommandTool, FindFilesTool, SearchContentTool, AskUserQuestionTool):
         registry.register(tool_type())
     return registry
