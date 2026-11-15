@@ -5,7 +5,7 @@ from weizhcode.tools.limits import excerpt
 
 
 class EditFileTool(BaseTool):
-    definition = ToolDefinition("edit_file", "对原文精确唯一匹配后替换。old_text 不含读取行号，换行必须与原文一致。",
+    definition = ToolDefinition("edit_file", "先用 read_file 读取相关实际原文，再对 old_text 唯一精确匹配替换；不含读取行号，换行须一致。零处或多处匹配时根据错误调整，不猜测成功。",
                                 schema({"path": TEXT, "old_text": TEXT, "new_text": {"type": "string"}},
                                        ["path", "old_text", "new_text"]), read_only=False)
 

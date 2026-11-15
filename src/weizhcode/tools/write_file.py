@@ -6,7 +6,7 @@ from weizhcode.tools.limits import excerpt
 
 
 class WriteFileTool(BaseTool):
-    definition = ToolDefinition("write_file", "创建或覆盖 UTF-8 文件，缺失父目录自动创建。",
+    definition = ToolDefinition("write_file", "依据用户目标创建或覆盖 UTF-8 文件，缺失父目录自动创建；有写入副作用，须以实际结果确认成功。",
                                 schema({"path": TEXT, "content": {"type": "string"}}, ["path", "content"]), read_only=False)
 
     def _prepare(self, call, context):

@@ -10,7 +10,7 @@ from weizhcode.tools.search_utils import SearchWalk
 
 
 class SearchContentTool(BaseTool):
-    definition = ToolDefinition("search_content", "搜索 UTF-8 文件内容，默认区分大小写的普通文本，可显式启用正则。返回文件/行/内容。",
+    definition = ToolDefinition("search_content", "搜索内容优先使用本工具，不用 run_command 模拟。搜索 UTF-8 文件内容，默认区分大小写的普通文本，可显式启用正则。返回文件/行/内容。",
                                 schema({"pattern": TEXT, "is_regex": {"type": "boolean", "default": False},
                                         **SEARCH_OPTIONS}, ["pattern"]), read_only=True)
 

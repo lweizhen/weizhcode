@@ -31,7 +31,7 @@ def shell_argv(command: str, shell: str) -> list[str]:
 
 
 class RunCommandTool(BaseTool):
-    definition = ToolDefinition("run_command", "在指定目录运行一次非交互命令；不保留 cd 和环境修改。",
+    definition = ToolDefinition("run_command", "仅专用工具不能完成时运行必要的非交互命令，不替代 read_file/find_files/search_content。受超时约束，可能有副作用；不保留 cd 和环境修改。",
                                 schema({"command": TEXT, "cwd": TEXT}, ["command"]), read_only=False)
 
     def _prepare(self, call, context):

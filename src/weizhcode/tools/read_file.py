@@ -7,7 +7,7 @@ from weizhcode.tools.limits import MAX_READ_LINES, MAX_RESULT_CHARS, excerpt
 
 
 class ReadFileTool(BaseTool):
-    definition = ToolDefinition("read_file", "按行读取 UTF-8 文件，行号不是原文。保留原始换行供精确编辑。", schema({
+    definition = ToolDefinition("read_file", "读取文件优先使用本工具。按行读取 UTF-8 文件，行号不是原文；edit_file 前先读取相关实际原文，保留原始换行。", schema({
         "path": TEXT,
         "start_line": {"type": "integer", "minimum": 1, "default": 1},
         "line_count": {"type": "integer", "minimum": 1, "maximum": MAX_READ_LINES, "default": MAX_READ_LINES},

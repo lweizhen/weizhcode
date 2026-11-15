@@ -14,7 +14,7 @@ SEARCH_OPTIONS = {
 
 
 class FindFilesTool(BaseTool):
-    definition = ToolDefinition("find_files", "按 glob 递归找文件，默认遵循 .gitignore 且跳过隐藏项，结果为绝对路径。",
+    definition = ToolDefinition("find_files", "查找路径优先使用本工具，不用 run_command 模拟。按 glob 递归找文件，默认遵循 .gitignore 且跳过隐藏项，结果为绝对路径。",
                                 schema({"pattern": TEXT, **SEARCH_OPTIONS}, ["pattern"]), read_only=True)
 
     def _prepare(self, call, context):
