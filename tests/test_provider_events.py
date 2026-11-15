@@ -73,7 +73,9 @@ async def test_anthropic_usage_cumulative_cache_and_missing():
     assert [s.output_tokens for s in snapshots] == [0, 2, 2, 2]
     packets[0]["message"]["usage"] = {"input_tokens": 0, "output_tokens": 0}
     events, _ = await _usage_stream(AnthropicProvider, "anthropic", packets)
-    assert [e.usage for e in events if e.type == "usage"][-1].input_tokens == 0
+    missing = [e.usage for e in events if e.type == "usage"][-1]
+    assert missing.input_tokens is None and missing.uncached_input_tokens == 0
+    assert missing.cache_read.availability == "missing" and not missing.complete
 
 
 async def test_anthropic_usage_null_invalid_and_decreasing():

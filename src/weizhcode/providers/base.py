@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 import json
 from typing import Protocol
+from weizhcode.prompting.contracts import PromptContext
 
-from weizhcode.models import ChatMessage, ProviderEvent, TokenUsage, ToolCall, ToolDefinition, parse_tool_arguments
+from weizhcode.models import ChatMessage, ProviderEvent, TokenUsage, UsageCounter, ToolCall, ToolDefinition, parse_tool_arguments
 
 
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
@@ -17,9 +19,18 @@ class UsageAccumulator:
         self.source = source
         self.values: dict[str, int] = {}
         self.invalid = False
+        self.invalid_fields = set()
         self.seen = False
 
+    def _put(self, name, value):
+        if type(value) is not int or value < self.values.get(name, 0):
+            self.invalid = True
+            self.invalid_fields.add(name)
+        else:
+            self.values[name] = value
+
     def update(self, raw) -> TokenUsage:
+        self.seen = True
         if not isinstance(raw, dict):
             self.invalid = True
             return self.snapshot()
@@ -28,37 +39,76 @@ class UsageAccumulator:
         else:
             mapping = {key: key for key in ("input_tokens", "output_tokens")}
         if self.source == "anthropic":
-            for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
-                mapping[key] = key
-                if not self.seen and key not in raw:
-                    self.values[key] = 0
-        self.seen = True
+            mapping.update(cache_creation_input_tokens="cache_write", cache_read_input_tokens="cache_read")
         for external, internal in mapping.items():
             if external not in raw:
                 continue
-            value = raw[external]
-            if type(value) is not int or value < self.values.get(internal, 0):
-                self.invalid = True
-                continue
-            self.values[internal] = value
+            self._put(internal, raw[external])
+        if self.source in {"openai", "qwen"}:
+            details_key = "input_tokens_details" if self.source == "openai" else "prompt_tokens_details"
+            if details_key in raw:
+                details = raw[details_key]
+                keys = {"cached_tokens": "cache_read"}
+                if self.source == "openai":
+                    keys["cache_write_tokens"] = "cache_write"
+                if not isinstance(details, dict):
+                    self.invalid = True
+                    self.invalid_fields.update(keys.values())
+                else:
+                    for external, internal in keys.items():
+                        if external in details:
+                            self._put(internal, details[external])
         return self.snapshot()
 
     def snapshot(self, *, complete: bool = False) -> TokenUsage:
         inputs = self.values.get("input_tokens")
         output = self.values.get("output_tokens")
+        uncached = inputs if self.source == "anthropic" else None
         if self.source == "anthropic" and inputs is not None:
-            cache_keys = ("cache_creation_input_tokens", "cache_read_input_tokens")
+            cache_keys = ("cache_write", "cache_read")
             inputs = (inputs + sum(self.values[k] for k in cache_keys)
                       if all(k in self.values for k in cache_keys) else None)
+        elif complete and inputs is not None:
+            keys = [k for k in ("cache_read", "cache_write") if k in self.values]
+            if sum(self.values[k] for k in keys) > inputs:
+                self.invalid = True
+                self.invalid_fields.update(keys)
+        def counter(key):
+            value = self.values.get(key)
+            return UsageCounter(value, "reported" if value is not None else "missing",
+                                key in self.invalid_fields)
         return TokenUsage(inputs, output,
                           complete and not self.invalid and inputs is not None and output is not None,
-                          self.source)
+                          self.source, counter("cache_read"), counter("cache_write"), uncached)
+
+
+def merge_usage_snapshot(previous: TokenUsage, current: TokenUsage) -> TokenUsage:
+    invalid = False
+    def number(old, new):
+        nonlocal invalid
+        if old is not None and new is not None and new < old:
+            invalid = True
+            return old
+        return old if new is None else new
+    def counter(old, new):
+        bad = old.invalid or new.invalid
+        if old.value is not None and new.value is not None and new.value < old.value:
+            return replace(old, invalid=True)
+        chosen = new if new.value is not None or old.value is None and new.availability == "not_applicable" else old
+        return replace(chosen, invalid=bad)
+    inputs = number(previous.input_tokens, current.input_tokens)
+    output = number(previous.output_tokens, current.output_tokens)
+    uncached = number(previous.uncached_input_tokens, current.uncached_input_tokens)
+    read, write = counter(previous.cache_read, current.cache_read), counter(previous.cache_write, current.cache_write)
+    return TokenUsage(inputs, output, current.complete and not invalid and not read.invalid
+                      and not write.invalid and inputs is not None and output is not None,
+                      current.source, read, write, uncached)
 
 
 class Provider(Protocol):
     async def stream_chat(
         self, messages: list[ChatMessage], *, tools: Sequence[ToolDefinition] = (),
-        system_prompt: str = "", allow_tools: bool = True,
+        system_prompt: str = "", allow_tools: bool = True, prompt_context: PromptContext | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         ...
 

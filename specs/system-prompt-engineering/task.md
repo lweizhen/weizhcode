@@ -531,11 +531,11 @@
 | T07 | 已完成（定向验证） | 项目 .venv Python：prompting/environment/registry/file_tools 共100通过；原生Windows检查在正常本机环境执行 |
 | T08 | 已完成（定向验证） | 项目 .venv Python：prompting/environment/registry/file_tools 共100通过；原生Windows检查在正常本机环境执行 |
 | T09 | 已完成（定向验证） | 项目 .venv Python：prompting/environment/registry/file_tools 共100通过；原生Windows检查在正常本机环境执行 |
-| T10 | 未开始 | 尚无通过结论 |
-| T11 | 未开始 | 尚无通过结论 |
-| T12 | 未开始 | 尚无通过结论 |
-| T13 | 未开始 | 尚无通过结论 |
-| T14 | 未开始 | 尚无通过结论 |
+| T10 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
+| T11 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
+| T12 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
+| T13 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
+| T14 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
 | T15 | 未开始 | 尚无通过结论 |
 | T16 | 未开始 | 尚无通过结论 |
 | T17 | 未开始 | 尚无通过结论 |

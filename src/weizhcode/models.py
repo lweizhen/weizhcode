@@ -23,14 +23,46 @@ EVENT_QUEUE_SIZE = 128
 
 
 @dataclass(frozen=True)
+class UsageCounter:
+    value: int | None = None
+    availability: Literal["reported", "missing", "not_applicable"] = "missing"
+    invalid: bool = False
+
+    def __post_init__(self):
+        if self.availability not in {"reported", "missing", "not_applicable"}:
+            raise ValueError("非法统计可用性")
+        if self.value is not None and (type(self.value) is not int or self.value < 0):
+            raise ValueError("非法缓存计数")
+        if (self.availability == "reported") != (self.value is not None):
+            raise ValueError("统计值与可用性不一致")
+
+
+@dataclass(frozen=True)
+class CacheCounterTotals:
+    known_tokens: int = 0
+    reported_requests: int = 0
+    not_applicable_requests: int = 0
+    invalid_requests: int = 0
+
+    def add(self, counter: UsageCounter) -> CacheCounterTotals:
+        return CacheCounterTotals(self.known_tokens + (counter.value or 0),
+            self.reported_requests + (counter.availability == "reported"),
+            self.not_applicable_requests + (counter.availability == "not_applicable"),
+            self.invalid_requests + counter.invalid)
+
+
+@dataclass(frozen=True)
 class TokenUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     complete: bool = False
     source: str = "unknown"
+    cache_read: UsageCounter = field(default_factory=UsageCounter)
+    cache_write: UsageCounter = field(default_factory=UsageCounter)
+    uncached_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        for value in (self.input_tokens, self.output_tokens):
+        for value in (self.input_tokens, self.output_tokens, self.uncached_input_tokens):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError("Token 计数须为非负整数或未知")
         if self.complete and (self.input_tokens is None or self.output_tokens is None):
@@ -45,6 +77,8 @@ class UsageTotals:
     output_requests: int = 0
     request_count: int = 0
     incomplete_requests: int = 0
+    cache_read: CacheCounterTotals = field(default_factory=CacheCounterTotals)
+    cache_write: CacheCounterTotals = field(default_factory=CacheCounterTotals)
 
     def add(self, usage: TokenUsage) -> UsageTotals:
         return UsageTotals(
@@ -54,6 +88,8 @@ class UsageTotals:
             self.output_requests + (usage.output_tokens is not None),
             self.request_count + 1,
             self.incomplete_requests + (not usage.complete),
+            self.cache_read.add(usage.cache_read),
+            self.cache_write.add(usage.cache_write),
         )
 
 

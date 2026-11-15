@@ -59,7 +59,8 @@ def add_usage(protocol, script):
     import copy
     script = copy.deepcopy(script)
     if protocol == "anthropic":
-        script.insert(0, {"type": "message_start", "message": {"usage": {"input_tokens": 10, "output_tokens": 0}}})
+        script.insert(0, {"type": "message_start", "message": {"usage": {"input_tokens": 10, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}})
         usage = {"type": "message_delta", "usage": {"output_tokens": 2}}
         index = len(script)-1 if script[-1].get("type") == "message_stop" else len(script)
         script[index:index] = [usage, usage]
