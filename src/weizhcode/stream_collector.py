@@ -4,8 +4,9 @@ import asyncio
 from copy import deepcopy
 from dataclasses import replace
 
-from weizhcode.models import RoundResponse, TokenUsage, TurnEvent
+from weizhcode.models import RoundResponse, TurnEvent
 from weizhcode.redaction import Redactor, StreamingRedactor, safe_text
+from weizhcode.providers.base import merge_usage_snapshot
 
 
 class StreamCollector:
@@ -34,6 +35,7 @@ class StreamCollector:
 
         try:
             while not context.cancel_event.is_set():
+                state.request_started = True
                 pending = asyncio.create_task(anext(stream))
                 context.owned_tasks.add(pending)
                 done, _ = await asyncio.wait((pending, cancelled), return_when=asyncio.FIRST_COMPLETED)
@@ -49,16 +51,14 @@ class StreamCollector:
                 if event is not None:
                     if event.type == "usage" and event.usage is not None:
                         previous, current = state.usage, event.usage
-                        values = []
                         for old, new in ((previous.input_tokens, current.input_tokens),
-                                         (previous.output_tokens, current.output_tokens)):
+                                         (previous.output_tokens, current.output_tokens),
+                                         (previous.uncached_input_tokens, current.uncached_input_tokens)):
                             if old is not None and new is not None and new < old:
                                 invalid_usage = True
-                                values.append(old)
-                            else:
-                                values.append(old if new is None else new)
-                        state.usage = TokenUsage(*values, current.complete and not invalid_usage,
-                                                 self.redactor.display(current.source))
+                        merged = merge_usage_snapshot(previous, current)
+                        state.usage = replace(merged, complete=merged.complete and not invalid_usage,
+                                              source=self.redactor.display(current.source))
                     elif event.type == "done":
                         message = event.assistant_message
                         if message is None or message.role != "assistant":

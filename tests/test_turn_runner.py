@@ -175,6 +175,85 @@ def loop_runner(replies, executor=None, **kwargs):
                        executor or LoopExecutor(), Redactor(["secret-token"]), **kwargs)
 
 
+async def test_environment_once_per_task_and_reminder_schedule(tmp_path):
+    from weizhcode.models import ToolContext
+    from weizhcode.prompting import EnvironmentSnapshot
+    from weizhcode.prompting.reminders import FULL_PLAN_REMINDER, BRIEF_PLAN_REMINDER
+    class Capture:
+        def __init__(self):
+            self.calls = []
+        async def capture(self, **kwargs):
+            self.calls.append(kwargs)
+            return EnvironmentSnapshot(project_root=str(kwargs["project_root"]), model="test")
+    capture = Capture()
+    executor = LoopExecutor()
+    executor.context = ToolContext(tmp_path)
+    call = ToolCall("id", "read_file", '{"path":"x"}', {"path": "x"})
+    r = loop_runner([*[reply(calls=(call,)) for _ in range(9)], reply("done"), reply("next"), reply("execute")],
+                    executor, environment_collector=capture)
+    r.set_mode("plan")
+    try:
+        events = [e async for e in r.run("plan")]
+        assert events[-1].reason == "completed" and len(capture.calls) == 1
+        assert capture.calls[0]["project_root"] == tmp_path
+        contexts = [kwargs["prompt_context"] for _, kwargs in r.provider.requests]
+        assert all(kwargs["system_prompt"] == "" for _, kwargs in r.provider.requests)
+        for index, ctx in enumerate(contexts, 1):
+            assert ctx.supplements[0].text == (FULL_PLAN_REMINDER if index in {1, 5, 9} else BRIEF_PLAN_REMINDER)
+            assert ctx.stable_text == SYSTEM_PROMPT and ctx.environment_text == contexts[0].environment_text
+        assert not any("<system-reminder>" in msg.content for msg in r.conversation.messages())
+        _ = [e async for e in r.run("new plan")]
+        assert len(capture.calls) == 2 and r.provider.requests[-1][1]["prompt_context"].supplements[0].text == FULL_PLAN_REMINDER
+        r.set_mode("normal")
+        _ = [e async for e in r.run("execute")]
+        assert len(capture.calls) == 3 and not r.provider.requests[-1][1]["prompt_context"].supplements
+    finally:
+        await r.aclose()
+
+
+async def test_environment_cancel_before_request_and_recover():
+    import asyncio
+    from weizhcode.prompting import EnvironmentSnapshot
+    entered = asyncio.Event()
+    class Capture:
+        calls = 0
+        async def capture(self, *, context, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                await context.cancel_event.wait()
+            return EnvironmentSnapshot()
+    r = loop_runner([reply("recovered")], environment_collector=Capture())
+    async def consume():
+        return [e async for e in r.run("cancel")]
+    work = asyncio.create_task(consume())
+    await entered.wait()
+    r.cancel_current()
+    events = await work
+    assert events[-1].reason == "cancelled" and r.usage_totals.request_count == 0
+    assert not r.provider.requests and not r.busy
+    events = [e async for e in r.run("next")]
+    assert events[-1].reason == "completed" and r.usage_totals.request_count == 1
+    await r.aclose()
+
+
+async def test_environment_failure_degrades_and_cache_settles_once():
+    from weizhcode.models import TokenUsage, UsageCounter
+    class Capture:
+        async def capture(self, **kwargs):
+            raise OSError("private error")
+    usage = TokenUsage(150, 4, True, "fake", UsageCounter(30, "reported"), UsageCounter(20, "reported"))
+    r = loop_runner([[ProviderEvent("usage", usage=usage), ProviderEvent("usage", usage=usage), *reply()]],
+                    environment_collector=Capture())
+    events = [e async for e in r.run("test")]
+    assert events[-1].reason == "completed"
+    assert events[-1].totals.cache_read.known_tokens == 30
+    assert events[-1].totals.cache_write.known_tokens == 20
+    assert events[-1].totals.input_tokens == 150 and events[-1].totals.request_count == 1
+    assert "private error" not in str(r.provider.requests)
+    await r.aclose()
+
+
 async def test_loop_single_flight_natural_and_empty_response():
     r = loop_runner([reply(), reply("")])
     stream = r.run("hello")

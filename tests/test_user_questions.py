@@ -107,7 +107,16 @@ async def test_ask_question_runner_history_ownership_and_redaction(tmp_path):
     registry, conv, safe = create_default_registry(), Conversation(), Redactor(["secret-key"])
     call = question_call(["secret-key", "other"])
     provider = FakeProvider([reply("", (call,)), reply("已确认，等待 /do")])
-    runner = TurnRunner(provider, conv, registry, ToolExecutor(registry, ToolContext(tmp_path), safe), safe)
+    from weizhcode.prompting import EnvironmentSnapshot
+    from weizhcode.prompting.reminders import FULL_PLAN_REMINDER, BRIEF_PLAN_REMINDER
+    class Capture:
+        calls = 0
+        async def capture(self, **kwargs):
+            self.calls += 1
+            return EnvironmentSnapshot(project_root=str(tmp_path))
+    capture = Capture()
+    runner = TurnRunner(provider, conv, registry, ToolExecutor(registry, ToolContext(tmp_path), safe), safe,
+                        environment_collector=capture)
     token = runner.bind_questions()
     runner.set_mode("plan")
     events = []
@@ -117,9 +126,15 @@ async def test_ask_question_runner_history_ownership_and_redaction(tmp_path):
             assert "secret-key" not in repr(e.question)
             assert not runner.submit_answer("old", e.question.question_id, {"text":"bad"})[0]
             assert len(provider.requests) == 1
+            await asyncio.sleep(.01)
+            assert len(provider.requests) == 1 and capture.calls == 1
+            assert runner.usage_totals.request_count == 1
             assert runner.submit_answer(e.run_id, e.question.question_id, {"option_index":0})[0]
     assert events[-1].reason == "completed" and events[-1].iteration == 2
     assert len(provider.requests) == 2 and runner.mode == "plan"
+    assert capture.calls == 1 and runner.usage_totals.request_count == 2
+    assert provider.requests[0][1]["prompt_context"].supplements[0].text == FULL_PLAN_REMINDER
+    assert provider.requests[1][1]["prompt_context"].supplements[0].text == BRIEF_PLAN_REMINDER
     assert [m.role for m in conv.messages()] == ["user","assistant","tool","assistant"]
     assert "[redacted]" in conv.messages()[2].tool_results[0].content
     runner.unbind_questions(token)

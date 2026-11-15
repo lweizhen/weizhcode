@@ -542,12 +542,12 @@
 | T18 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
 | T19 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
 | T20 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
-| T21 | 未开始 | 尚无通过结论 |
-| T22 | 未开始 | 尚无通过结论 |
-| T23 | 未开始 | 尚无通过结论 |
-| T24 | 未开始 | 尚无通过结论 |
-| T25 | 未开始 | 尚无通过结论 |
-| T26 | 未开始 | 尚无通过结论 |
+| T21 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
+| T22 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
+| T23 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
+| T24 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
+| T25 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
+| T26 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
 | T27 | 未开始 | 尚无通过结论 |
 | T28 | 未开始 | 尚无通过结论 |
 | T29 | 未开始 | 尚无通过结论 |

@@ -128,7 +128,8 @@ class TurnRunner:
 
     def __init__(self, provider, conversation, registry, executor, redactor=None, *,
                  collector=None, scheduler=None, max_iterations=MAX_ITERATIONS,
-                 max_unknown_run=MAX_UNKNOWN_RUN, system_prompt=None, questions=None):
+                 max_unknown_run=MAX_UNKNOWN_RUN, system_prompt=None, questions=None,
+                 environment_collector=None):
         from weizhcode.prompts import SYSTEM_PROMPT
         from weizhcode.stream_collector import StreamCollector
         from weizhcode.tool_scheduler import ToolScheduler
@@ -147,6 +148,8 @@ class TurnRunner:
         executor.questions = self.questions
         self.max_iterations, self.max_unknown_run = max_iterations, max_unknown_run
         self.system_prompt = SYSTEM_PROMPT if system_prompt is None else system_prompt
+        from weizhcode.prompting.environment import EnvironmentCollector
+        self.environment_collector = environment_collector or EnvironmentCollector()
         self.mode = "normal"
         self.usage_totals = UsageTotals()
         self._settled = set()
@@ -232,15 +235,27 @@ class TurnRunner:
         context.exchange_committed = True
 
     async def _drive(self, user_text, context, emit):
-        from weizhcode.prompts import PLAN_MODE_REMINDER
+        from weizhcode import __version__
+        from weizhcode.prompting import build_prompt_context, EnvironmentSnapshot
+        from weizhcode.prompting.environment import finish_environment
         reason, detail, assistant, external_cancel = "internal_error", "", None, False
         async def send(kind, **kwargs):
             state = context.stream
             await emit(TurnEvent(kind, run_id=context.run_id, request_id=state.request_id if state else "",
                                  iteration=context.iteration, mode=context.mode,
                                  max_iterations=self.max_iterations, **kwargs))
-        self.conversation.add_user_message(user_text)
         try:
+            self.conversation.add_user_message(user_text)
+            root = getattr(getattr(self.executor, "context", None), "project_root", None)
+            model = getattr(getattr(self.provider, "config", None), "model", "unavailable")
+            snapshot = EnvironmentSnapshot()
+            if not context.cancel_event.is_set():
+                try:
+                    snapshot = await self.environment_collector.capture(project_root=root, app_version=__version__,
+                        model=model, context=context, redactor=self.redactor)
+                except (OSError, ValueError, TypeError):
+                    snapshot = EnvironmentSnapshot(app_version=__version__, model=model)
+            tools = self.registry.definitions_for_mode(context.mode)
             for iteration in range(1, self.max_iterations + 1):
                 if context.cancel_event.is_set():
                     reason = "cancelled"
@@ -250,13 +265,14 @@ class TurnRunner:
                 await send("iteration_started")
                 state = StreamState(iteration=iteration)
                 context.stream = state
-                prompt = self.system_prompt + ("\n" + PLAN_MODE_REMINDER if context.mode == "plan" else "")
+                prompt = build_prompt_context(self.system_prompt, snapshot, mode=context.mode,
+                                              iteration=iteration, redactor=self.redactor)
                 try:
                     response = await self.collector.collect(self.conversation.messages(),
-                        tools=self.registry.definitions_for_mode(context.mode), system_prompt=prompt,
+                        tools=tools, system_prompt="", prompt_context=prompt,
                         context=context, state=state, emit=emit)
                 finally:
-                    if state.request_id not in self._settled:
+                    if state.request_started and state.request_id not in self._settled:
                         self._settled.add(state.request_id)
                         self.usage_totals = self.usage_totals.add(state.usage)
                         await send("usage", usage=state.usage, totals=self.usage_totals)
@@ -306,6 +322,7 @@ class TurnRunner:
             await send("error", text=detail, reason=reason)
         finally:
             try:
+                await finish_environment(context)
                 if assistant is None and context.stream and context.stream.completed:
                     assistant = context.stream.assistant_message
                 if assistant is not None and assistant.tool_calls and not context.exchange_committed:

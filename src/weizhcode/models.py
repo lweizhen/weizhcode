@@ -335,6 +335,7 @@ class StreamState:
     text: str = ""
     error: str = ""
     cancelled: bool = False
+    request_started: bool = False
 
 
 @dataclass(frozen=True)

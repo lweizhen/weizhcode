@@ -23,6 +23,23 @@ class ScriptProvider:
             self.closed = True
 
 
+async def test_collector_cache_fields_partial_and_repeat():
+    from weizhcode.models import UsageCounter
+    usage = TokenUsage(100, 4, True, "test", UsageCounter(20, "reported"), UsageCounter(30, "reported"), 50)
+    result, state, _, _ = await collect([ProviderEvent("usage", usage=usage),
+        ProviderEvent("usage", usage=usage), ProviderEvent("error", message="failed")])
+    assert result is None and not state.usage.complete
+    assert state.usage.cache_read.value == 20 and state.usage.cache_write.value == 30
+    assert state.usage.uncached_input_tokens == 50
+
+
+async def test_collector_pre_cancel_does_not_start_request():
+    context = RunContext()
+    context.cancel_event.set()
+    _, state, _, _ = await collect([], context=context)
+    assert not state.request_started
+
+
 async def collect(script, *, context=None, events=None, redactor=None):
     provider = ScriptProvider(script)
     context = context or RunContext()
