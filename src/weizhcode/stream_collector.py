@@ -13,9 +13,10 @@ class StreamCollector:
         self.provider = provider
         self.redactor = redactor or Redactor()
 
-    async def collect(self, messages, *, tools, system_prompt, context, state, emit):
+    async def collect(self, messages, *, tools, system_prompt, context, state, emit, prompt_context=None):
+        options = {"prompt_context": prompt_context} if prompt_context is not None else {}
         stream = self.provider.stream_chat(messages, tools=tools, system_prompt=system_prompt,
-                                           allow_tools=True)
+                                           allow_tools=True, **options)
         cancelled = asyncio.create_task(context.cancel_event.wait())
         context.owned_tasks.add(cancelled)
         pending = None

@@ -10,6 +10,7 @@ from weizhcode.errors import ProviderError, StreamError, redact_secret
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
 from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, UsageAccumulator, diagnostic_text, make_call
 from weizhcode.providers.sse import SSEEvent, stream_sse
+from weizhcode.providers.prompt_adapter import apply_prompt
 from weizhcode.redaction import Redactor
 
 StreamFunc = Callable[..., AsyncIterator[SSEEvent]]
@@ -20,7 +21,7 @@ class AnthropicProvider:
         self.config = config
         self._stream = stream_func
 
-    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True):
+    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
         yield ProviderEvent(type="start")
         body = {"model": self.config.model, "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
                 "messages": _messages_payload(messages, Redactor([self.config.api_key])), "stream": True}
@@ -29,6 +30,7 @@ class AnthropicProvider:
         if tools:
             body["tools"] = [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools]
             body["tool_choice"] = {"type": "auto"} if allow_tools else {"type": "none"}
+        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context)
         blocks = {}
         closed = set()
         text_parts = []

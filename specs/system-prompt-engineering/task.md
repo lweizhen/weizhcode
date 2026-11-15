@@ -536,12 +536,12 @@
 | T12 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
 | T13 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
 | T14 | 已完成（定向验证） | cache_usage/provider_events/protocol_integration 共82通过，17.60秒；全量待验 |
-| T15 | 未开始 | 尚无通过结论 |
-| T16 | 未开始 | 尚无通过结论 |
-| T17 | 未开始 | 尚无通过结论 |
-| T18 | 未开始 | 尚无通过结论 |
-| T19 | 未开始 | 尚无通过结论 |
-| T20 | 未开始 | 尚无通过结论 |
+| T15 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
+| T16 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
+| T17 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
+| T18 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
+| T19 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
+| T20 | 已完成（定向验证） | prompt_protocols/provider_tools/stream_collector 共74通过，1.09秒；离线捕获实际请求 |
 | T21 | 未开始 | 尚无通过结论 |
 | T22 | 未开始 | 尚无通过结论 |
 | T23 | 未开始 | 尚无通过结论 |

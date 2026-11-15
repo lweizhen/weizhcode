@@ -10,6 +10,7 @@ from weizhcode.errors import ProviderError, StreamError, redact_secret
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
 from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, UsageAccumulator, diagnostic_text, make_call, safe_arguments
 from weizhcode.providers.sse import SSEEvent, stream_sse
+from weizhcode.providers.prompt_adapter import apply_prompt
 from weizhcode.redaction import Redactor
 
 StreamFunc = Callable[..., AsyncIterator[SSEEvent]]
@@ -20,7 +21,7 @@ class OpenAIProvider:
         self.config = config
         self._stream = stream_func
 
-    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True):
+    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
         yield ProviderEvent(type="start")
         body = {"model": self.config.model, "input": _input_payload(messages, Redactor([self.config.api_key])),
                 "stream": True, "store": False, "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
@@ -32,6 +33,7 @@ class OpenAIProvider:
                              "parameters": t.parameters, "strict": False} for t in tools]
             body["parallel_tool_calls"] = True
             body["tool_choice"] = "auto" if allow_tools else "none"
+        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context)
         items = {}
         buffers = {}
         local_ids = {}
