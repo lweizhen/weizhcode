@@ -109,3 +109,113 @@ def test_policy_model_protocol_and_unknown_compatible():
     for protocol in ("anthropic", "openai", "qwen"):
         assert select_cache_policy(config(protocol, False)).strategy == "prefix_only"
     assert select_cache_policy(replace(config("openai"), model="gpt-future")).strategy == "prefix_only"
+
+
+def test_manual_default_does_not_load_config_or_make_provider(monkeypatch, capsys):
+    import manual_prompt_smoke as manual
+    import weizhcode.config as settings
+    def forbidden(*args, **kwargs):
+        raise AssertionError("offline must not load credentials or create provider")
+    monkeypatch.setattr(settings, "load_config", forbidden)
+    monkeypatch.setattr(manual, "create_provider", forbidden)
+    assert manual.main([]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["offline"] and "并非当前配置" in output["notice"]
+
+
+def test_live_guard_requires_confirmation(monkeypatch):
+    import manual_prompt_smoke as manual
+    import weizhcode.config as settings
+    from weizhcode.models import AppConfig
+    cfg = config("openai")
+    monkeypatch.setattr(settings, "load_config", lambda: AppConfig("test", [cfg]))
+    monkeypatch.setattr(settings, "resolve_default_provider", lambda app: cfg)
+    def forbidden(*args):
+        raise AssertionError("declined live must not create provider")
+    monkeypatch.setattr(manual, "create_provider", forbidden)
+    assert manual.main(["--live"], ask=lambda _: "NO") == 0
+
+
+async def test_live_guard_cache_two_requests_no_tools(monkeypatch, capsys):
+    import manual_prompt_smoke as manual
+    cfg = config("openai")
+    requests = []
+    async def stream(*args, **kwargs):
+        requests.append(deepcopy(kwargs["json_body"]))
+        item = {"type": "function_call", "id": "fc", "call_id": "not-executed",
+                "name": "write_file", "arguments": '{"path":"bad","content":"bad"}'}
+        yield SSEEvent(None, json.dumps({"type": "response.output_item.added", "output_index": 0, "item": item}))
+        yield SSEEvent(None, json.dumps({"type": "response.completed", "response": {
+            "status": "completed", "output": [item],
+            "usage": {"input_tokens": 150, "output_tokens": 4,
+                      "input_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 20}}}}))
+    provider = OpenAIProvider(cfg, stream)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("cache observation must not create tool executor")
+    monkeypatch.setattr(manual, "SampleExecutor", forbidden)
+    await manual.cache_observation(provider, cfg, "modular", manual.Redactor([cfg.api_key]))
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(requests) == len(records) == 2 and records[-1]["same_prefix"]
+    assert all(r["stop_reason"] == "tool_requested_not_executed" and not r["tools_executed"] for r in records)
+    assert records[-1]["usage"]["cache_read"]["value"] == 30
+    assert "test-secret" not in json.dumps(records)
+
+
+@pytest.mark.parametrize("name,raw", [("run_command", {"command": "echo forbidden"}),
+    ("read_file", {"path": "../outside"}), ("write_file", {"path": "other.txt", "content": "bad"})])
+async def test_behavior_guard_blocks_non_samples(tmp_path, name, raw):
+    import asyncio
+    import manual_prompt_smoke as manual
+    from weizhcode.models import ToolContext, ToolSlot
+    registry = create_default_registry()
+    executor = manual.SampleExecutor(registry, ToolContext(tmp_path))
+    call = ToolCall("id", name, json.dumps(raw), raw)
+    slot, cancel = ToolSlot(0, call), asyncio.Event()
+    async def emit(event):
+        pass
+    try:
+        result = await executor.execute(slot, mode="normal", cancel=cancel, emit=emit)
+        assert result.error_code == "SMOKE_SCOPE" and cancel.is_set()
+        assert not slot.execution_started and not list(tmp_path.iterdir())
+    finally:
+        await executor.aclose()
+
+
+def test_behavior_guard_baseline_is_local_and_schema_identical():
+    import manual_prompt_smoke as manual
+    stable, old = manual.variant("baseline")
+    new_stable, new = manual.variant("modular")
+    assert stable != new_stable and "七" not in stable
+    for first, second in zip(old.definitions(), new.definitions()):
+        assert first.name == second.name and first.parameters == second.parameters
+        assert first.read_only == second.read_only and first.execution_kind == second.execution_kind
+    assert create_default_registry().get("edit_file").definition.description == new.get("edit_file").definition.description
+
+
+@pytest.mark.parametrize("scenario", ["error", "cancel"])
+async def test_behavior_guard_cleanup_and_cancel_recovery(monkeypatch, capsys, scenario):
+    import manual_prompt_smoke as manual
+    original = manual.TemporaryDirectory
+    roots, requests = [], []
+    def temporary(*args, **kwargs):
+        folder = original(*args, **kwargs)
+        from pathlib import Path
+        roots.append(Path(folder.name))
+        return folder
+    monkeypatch.setattr(manual, "TemporaryDirectory", temporary)
+    cfg = config("openai")
+    async def stream(*args, **kwargs):
+        requests.append(kwargs["json_body"])
+        assert roots[0].joinpath("fixture.txt").exists()
+        yield SSEEvent(None, json.dumps({"type": "response.output_text.delta", "delta": "hello"}))
+        if scenario == "error":
+            raise RuntimeError("test-secret hidden exception")
+        yield SSEEvent(None, json.dumps({"type": "response.completed", "response": {"status": "completed", "output": []}}))
+    answers = iter(["files"] if scenario == "error" else ["cancel", "continue"])
+    await manual.behavior_observation(OpenAIProvider(cfg, stream), cfg, "modular",
+                                      manual.Redactor([cfg.api_key]), lambda _: next(answers))
+    assert roots and not roots[0].exists()
+    output = capsys.readouterr().out
+    assert "test-secret" not in output
+    assert len(requests) == (1 if scenario == "error" else 2)
+    assert ('"stop_reason": "provider_error"' if scenario == "error" else '"stop_reason": "cancelled"') in output

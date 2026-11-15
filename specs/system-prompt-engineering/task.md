@@ -548,11 +548,11 @@
 | T24 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
 | T25 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
 | T26 | 已完成（定向验证） | collector/runner/questions/protocol_integration/tui/prompt_protocols/cache_usage 共171通过，33.20秒 |
-| T27 | 未开始 | 尚无通过结论 |
-| T28 | 未开始 | 尚无通过结论 |
-| T29 | 未开始 | 尚无通过结论 |
-| T30 | 未开始 | 尚无通过结论 |
-| T31 | 未开始 | 尚无通过结论 |
-| T32 | 未开始 | 尚无通过结论 |
-| T33 | 未开始 | 尚无通过结论 |
-| T34 | 未开始 | 尚无通过结论 |
+| T27 | 已完成（离线验证） | 手动入口保护组30通过；默认入口/--help实跑；README原不存在，按批准的使用说明范围新增 |
+| T28 | 已完成（离线验证） | 手动入口保护组30通过；默认入口/--help实跑；README原不存在，按批准的使用说明范围新增 |
+| T29 | 已完成（离线验证） | 手动入口保护组30通过；默认入口/--help实跑；README原不存在，按批准的使用说明范围新增 |
+| T30 | 已完成（离线验证） | 手动入口保护组30通过；默认入口/--help实跑；README原不存在，按批准的使用说明范围新增 |
+| T31 | 已完成（离线工程回归） | uv lock --check及uv run python -m compileall -q src退出0；uv run pytest -q -ra：471通过、2平台跳过，71.12秒 |
+| T32 | 待用户终端手测 | 本次未在真实PowerShell中启动交互程序，不用无界面测试替代 |
+| T33 | 待真实调用许可/条件 | 本次未加载真实认证配置或发模型请求；三服务命中与人工行为对比均待验 |
+| T34 | 已完成（诚实交付） | Checklist第13节：45项通过、11项待真实终端/API或人工验收；未推送 |

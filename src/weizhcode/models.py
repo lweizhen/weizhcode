@@ -29,6 +29,8 @@ class UsageCounter:
     invalid: bool = False
 
     def __post_init__(self):
+        if type(self.invalid) is not bool:
+            raise ValueError("统计异常标记须为布尔值")
         if self.availability not in {"reported", "missing", "not_applicable"}:
             raise ValueError("非法统计可用性")
         if self.value is not None and (type(self.value) is not int or self.value < 0):
@@ -43,6 +45,11 @@ class CacheCounterTotals:
     reported_requests: int = 0
     not_applicable_requests: int = 0
     invalid_requests: int = 0
+
+    def __post_init__(self):
+        if any(type(v) is not int or v < 0 for v in (self.known_tokens, self.reported_requests,
+               self.not_applicable_requests, self.invalid_requests)):
+            raise ValueError("汇总计数须为非负整数")
 
     def add(self, counter: UsageCounter) -> CacheCounterTotals:
         return CacheCounterTotals(self.known_tokens + (counter.value or 0),

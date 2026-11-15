@@ -1,8 +1,13 @@
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Literal
 
 
-_APP_ORIGIN = object()
+class _Origin(Enum):
+    APPLICATION = "application"
+
+
+_APP_ORIGIN = _Origin.APPLICATION
 
 
 @dataclass(frozen=True)

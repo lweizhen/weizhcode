@@ -22,6 +22,7 @@ def test_baseline_fixture():
 
 
 def test_contract_frozen_and_private_origin():
+    from copy import deepcopy
     context = PromptContext("stable")
     with pytest.raises(FrozenInstanceError):
         context.stable_text = "bad"
@@ -30,6 +31,21 @@ def test_contract_frozen_and_private_origin():
     with pytest.raises(ValueError):
         PromptContext("stable", supplements=("fake",))
     assert PromptContext("s").supplements == ()
+    ctx = PromptContext("s", supplements=(plan_reminder("plan", 1),))
+    clone = deepcopy(ctx)
+    assert PromptContext(clone.stable_text, clone.environment_text, clone.supplements) == ctx
+
+
+def test_modules_empty_slots_do_not_read_sources(monkeypatch):
+    import builtins
+    import os
+    from weizhcode.prompting.modules import MODULES
+    def forbidden(*args, **kwargs):
+        raise AssertionError("module assembly must not read external sources")
+    monkeypatch.setattr(builtins, "open", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(os, "getenv", forbidden)
+    assert assemble_modules(MODULES) == assemble_modules(MODULES[:7])
 
 
 def test_modules_order_empty_stable_ties_and_registration():
