@@ -23,6 +23,8 @@ def main():
     context = None
     operation = None
     state = "waiting"
+    purpose = "tools"
+    request_id = ""
     file_utils.resource_created = lambda path, identity: emit({"type": "resource", "path": str(path), "identity": identity})
     run_command.output_collected = lambda label, text: emit({"type": "output", "label": label, "text": text})
     for line in sys.stdin:
@@ -34,10 +36,21 @@ def main():
             if kind == "abort":
                 return
             if state == "waiting" and kind == "start":
+                purpose = message.get("purpose", "tools")
+                request_id = message.get("request_id", "")
+                if purpose not in {"tools", "permission"} or not isinstance(request_id, str):
+                    raise ValueError()
                 context = ToolContext(Path(message["project_root"]).resolve())
                 state = "ready"
                 emit({"type": "ready"})
-            elif state == "ready" and kind == "prepare":
+            elif state == "ready" and purpose == "permission" and kind in {"inspect_permission_path", "persist_permission_allow"}:
+                from weizhcode.permissions.worker_ops import handle
+                if message.get("request_id") != request_id:
+                    raise ValueError()
+                state = "done"
+                emit({"type": "permission_result", "request_id": request_id,
+                      **handle(message, context, resource_created=file_utils.resource_created)})
+            elif state == "ready" and purpose == "tools" and kind == "prepare":
                 call = ToolCall(**message["call"])
                 validated = registry.validate(call)
                 if isinstance(validated, ToolResult):

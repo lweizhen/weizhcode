@@ -83,7 +83,13 @@ class WindowsJob:
 
 
 class ManagedWorker:
-    def __init__(self):
+    def __init__(self, *, purpose="tools", request_id=None):
+        if purpose not in {"tools", "permission"}:
+            raise ValueError("非法工作进程目的")
+        from uuid import uuid4
+        self.purpose = purpose
+        self.request_id = request_id or uuid4().hex
+        self.permission_temp = None
         self.process = None
         self.job = None
         self.stderr_task = None
@@ -127,7 +133,10 @@ class ManagedWorker:
                 self.job.attach(self.process.pid)
             except OSError as exc:
                 raise ToolFailure("PROCESS_CONTROL_FAILED", "无法建立命令进程管理，未执行工具") from exc
-        await self._send({"type": "start", "project_root": str(context.project_root)})
+        if self.purpose == "permission":
+            self.permission_temp = context.project_root / ".weizhcode" / f".settings.local.{self.request_id}.tmp"
+        await self._send({"type": "start", "project_root": str(context.project_root),
+                          "purpose": self.purpose, "request_id": self.request_id})
         await self._receive("ready")
 
     async def _drain_stderr(self):
@@ -162,6 +171,8 @@ class ManagedWorker:
                 expected_path = None if self.preview is None else Path(self.preview.target).with_name(
                     f".weizhcode-{self.preview.operation_id}.tmp"
                 )
+                if self.purpose == "permission":
+                    expected_path = self.permission_temp
                 if path != expected_path or not isinstance(identity, list) or len(identity) != 2 or not all(type(n) is int for n in identity):
                     raise ToolFailure("INTERNAL_ERROR", "非法临时资源登记")
                 self.resources[path] = tuple(identity)
@@ -184,6 +195,15 @@ class ManagedWorker:
         await self._send({"type": "execute", "operation_id": operation_id})
         message = await self._receive("result")
         return ToolResult(**message["result"])
+
+    async def permission_operation(self, action, payload):
+        if self.purpose != "permission" or action not in {"inspect_permission_path", "persist_permission_allow"}:
+            raise ToolFailure("INTERNAL_ERROR", "非法权限辅助指令")
+        await self._send({"type": action, "request_id": self.request_id, **payload})
+        message = await self._receive("permission_result")
+        if message.get("request_id") != self.request_id:
+            raise ToolFailure("INTERNAL_ERROR", "权限辅助响应 ID 错误")
+        return message
 
     async def aclose(self):
         if self._close_task is None:
