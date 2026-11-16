@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from weizhcode.permissions.types import PathStamp, PermissionMode
+
 
 ProtocolName = Literal["anthropic", "openai", "qwen"]
 MessageRole = Literal["user", "assistant", "tool"]
 ProviderEventType = Literal["start", "text_delta", "tool_call_start", "tool_call", "done", "error", "usage"]
-AgentMode = Literal["normal", "plan"]
+AgentMode = PermissionMode
 StopReason = Literal["completed", "empty_response", "max_iterations", "unknown_tools",
                      "cancelled", "provider_error", "internal_error"]
 MAX_ITERATIONS = 25
@@ -162,6 +164,10 @@ class ToolResult:
     @classmethod
     def failure(cls, call: ToolCall, code: str, message: str, **metadata: object) -> ToolResult:
         status = {"USER_DENIED": "denied", "TOOL_TIMEOUT": "timeout", "TOOL_CANCELLED": "cancelled"}.get(code, "error")
+        if code in {"DANGEROUS_COMMAND", "PATH_OUTSIDE_PROJECT", "PATH_UNRESOLVED", "PERMISSION_ROOT_UNAVAILABLE",
+                    "PERMISSION_TARGET_CHANGED", "PERMISSION_RULE_DENIED", "PERMISSION_UNAVAILABLE",
+                    "INTERACTION_UNAVAILABLE", "TOOL_NOT_ALLOWED"}:
+            status = "denied"
         return cls(call.call_id, call.name, message, status, code, metadata)  # type: ignore[arg-type]
 
     def to_model_text(self, max_chars: int = 20_000) -> str:
@@ -229,6 +235,7 @@ class PreparedOperation:
     state: dict[str, object] = field(default_factory=dict)
     error: ToolResult | None = None
     operation_id: str = field(default_factory=lambda: uuid4().hex)
+    permission_stamp: PathStamp | None = None
 
 
 @dataclass(frozen=True)
@@ -293,6 +300,17 @@ class QuestionRequest:
 
 
 @dataclass(frozen=True)
+class ApprovalRequest:
+    approval_id: str
+    tool_name: str
+    friendly_name: str
+    arguments_preview: str
+    target_preview: str
+    reason: str
+    scope_hint: str
+
+
+@dataclass(frozen=True)
 class TurnEvent:
     type: str
     text: str = ""
@@ -309,6 +327,7 @@ class TurnEvent:
     usage: TokenUsage | None = None
     totals: UsageTotals | None = None
     question: QuestionRequest | None = None
+    approval: ApprovalRequest | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_call", deepcopy(self.tool_call))
@@ -320,7 +339,7 @@ class ToolSlot:
     index: int
     call: ToolCall
     local_id: str = ""
-    phase: Literal["pending", "preparing", "running", "finished"] = "pending"
+    phase: Literal["pending", "checking", "awaiting_approval", "preparing", "running", "finished"] = "pending"
     execution_started: bool = False
     result: ToolResult | None = None
     cleanup_error: str = ""
