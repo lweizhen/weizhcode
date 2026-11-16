@@ -71,7 +71,7 @@ async def test_submit_streams_reply_into_one_message() -> None:
         await pilot.pause()
         await pilot.pause()
 
-        messages = list(app.query(MessageView).results())
+        messages = [view for view in app.query(MessageView).results() if view.role in {"user", "assistant"}]
         assert len(messages) == 2
         assert messages[0].message_content == "你好"
         assert messages[1].message_content == "你好"
@@ -92,7 +92,7 @@ async def test_blank_input_is_ignored() -> None:
         await app.submit_text("   ")
         await pilot.pause()
 
-        assert list(app.query(MessageView).results()) == []
+        assert not [view for view in app.query(MessageView).results() if view.role in {"user", "assistant"}]
         assert provider.calls == []
 
 
@@ -140,13 +140,25 @@ def make_app(
     provider: FakeProvider | None = None,
     conversation: Conversation | None = None,
 ) -> WeizhCodeApp:
+    from pathlib import Path
+    from weizhcode.permissions.engine import PermissionEngine
+    from weizhcode.models import ToolContext
+    from weizhcode.tools import create_default_registry
+    from weizhcode.tools.executor import ToolExecutor
+    from weizhcode.turn_runner import TurnRunner
+    provider, conversation = provider or FakeProvider(), conversation or Conversation()
+    registry = create_default_registry()
+    permissions = PermissionEngine.load(Path("D:/demo"), user_home=Path("D:/nonexistent-test-home"))
+    runner = TurnRunner(provider, conversation, registry,
+                        ToolExecutor(registry, ToolContext(Path("D:/demo")), permissions=permissions))
     return WeizhCodeApp(
-        provider or FakeProvider(),
-        conversation or Conversation(),
+        provider,
+        conversation,
         provider_name="demo",
         model="demo-model",
         project_path="D:/demo",
         version="0.1.0",
+        runner=runner,
     )
 
 

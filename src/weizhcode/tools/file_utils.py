@@ -9,6 +9,7 @@ from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
+from contextvars import ContextVar
 
 from weizhcode.models import FileSnapshot, PreparedOperation, ToolContext
 from weizhcode.tools.base import ToolFailure
@@ -16,16 +17,23 @@ from weizhcode.tools.limits import CHUNK_SIZE, MAX_LINE_CHARS
 
 BOM = b"\xef\xbb\xbf"
 resource_created: Callable[[Path, tuple[int, int]], None] | None = None
+active_root = ContextVar("file_tool_root", default=None)
+
+
+def guard_path(path):
+    from weizhcode.permissions.sandbox import resolve_target
+    root = active_root.get()
+    return Path(resolve_target(str(path), root).canonical_target) if root else Path(path)
 
 
 def original_path(value: str, context: ToolContext) -> Path:
     path = Path(value).expanduser()
-    return Path(os.path.abspath(path if path.is_absolute() else context.project_root / path))
+    return path if path.is_absolute() else context.project_root / path
 
 
 def scan_file(original: Path, needle: bytes | None = None):
     """严格解码、计算指纹和原文计数，不缓存整个文件。"""
-    target = original.resolve()
+    target = guard_path(original).resolve()
     if not target.exists():
         return FileSnapshot(str(original), str(target), False), 0, None
     if not target.is_file():
@@ -38,6 +46,7 @@ def scan_file(original: Path, needle: bytes | None = None):
     suffix = b""
     processed = count = next_start = 0
     position = None
+    target = guard_path(target)
     with target.open("rb") as stream:
         before = os.fstat(stream.fileno())
         first = True
@@ -94,6 +103,7 @@ def verify_snapshot(snapshot: FileSnapshot) -> None:
 
 def bounded_lines(path: Path):
     """最多保留一行的有限前缀，超长部分排空并报告。"""
+    path = guard_path(path)
     with path.open("r", encoding="utf-8-sig", errors="strict", newline="") as stream:
         number = 0
         while True:
@@ -141,11 +151,13 @@ def atomic_update(operation: PreparedOperation, *, edit: bool = False) -> int:
         raise ToolFailure("INVALID_ARGUMENTS", "缺少文件快照")
     verify_snapshot(snapshot)
     target = Path(operation.target)
+    guard_path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     verify_snapshot(snapshot)
     temp = Path(str(operation.state["temp_path"]))
     created_identity = None
     try:
+        guard_path(temp)
         with temp.open("xb") as destination:
             info = os.fstat(destination.fileno())
             created_identity = (info.st_dev, info.st_ino)
@@ -155,6 +167,7 @@ def atomic_update(operation: PreparedOperation, *, edit: bool = False) -> int:
                 position = int(operation.state["position"]) + (3 if snapshot.bom else 0)
                 old = str(operation.arguments["old_text"]).encode("utf-8")
                 new = normalize_new_text(str(operation.arguments["new_text"]), snapshot.newline)
+                guard_path(target)
                 with target.open("rb") as source:
                     _copy(source, destination, position)
                     source.seek(len(old), 1)
@@ -167,14 +180,17 @@ def atomic_update(operation: PreparedOperation, *, edit: bool = False) -> int:
             destination.flush()
             os.fsync(destination.fileno())
         if snapshot.mode is not None:
+            guard_path(temp)
             os.chmod(temp, snapshot.mode)
         verify_snapshot(snapshot)
         size = temp.stat().st_size
+        guard_path(temp)
+        guard_path(target)
         os.replace(temp, target)
         return size
     finally:
         if created_identity is not None and temp.exists():
-            info = temp.stat()
-            if (info.st_dev, info.st_ino) == created_identity:
+            info = temp.lstat()
+            if not stat.S_ISLNK(info.st_mode) and (info.st_dev, info.st_ino) == created_identity:
                 temp.unlink()
 

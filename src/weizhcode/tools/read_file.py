@@ -2,7 +2,7 @@ from pathlib import Path
 
 from weizhcode.models import PreparedOperation, ToolDefinition, ToolResult
 from weizhcode.tools.base import BaseTool, TEXT, ToolFailure, schema
-from weizhcode.tools.file_utils import bounded_lines, original_path
+from weizhcode.tools.file_utils import bounded_lines, original_path, guard_path
 from weizhcode.tools.limits import MAX_READ_LINES, MAX_RESULT_CHARS, excerpt
 
 
@@ -17,7 +17,7 @@ class ReadFileTool(BaseTool):
         args = dict(call.arguments or {})
         args["start_line"] = int(args.get("start_line", 1))
         args["line_count"] = int(args.get("line_count", MAX_READ_LINES))
-        path = original_path(str(args["path"]), context).resolve()
+        path = guard_path(original_path(str(args["path"]), context))
         if not path.is_file():
             raise ToolFailure("NOT_A_FILE" if path.exists() else "FILE_NOT_FOUND", "目标不是文件或不存在")
         return PreparedOperation(call, args, str(path), str(path))
@@ -32,6 +32,7 @@ class ReadFileTool(BaseTool):
         truncated = False
         newline = "\n"
         next_line = start
+        path = guard_path(path)
         with path.open("rb") as stream:
             bom = stream.read(3) == b"\xef\xbb\xbf"
         for number, text, long_line in bounded_lines(path):

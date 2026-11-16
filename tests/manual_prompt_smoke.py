@@ -49,7 +49,19 @@ def variant(variant_name):
 class SampleExecutor(ToolExecutor):
     """Test-only restriction; not a product sandbox or permission implementation."""
 
-    async def execute(self, slot, *, mode, cancel, emit):
+    def __init__(self, *args, **kwargs):
+        from weizhcode.permissions.engine import PermissionEngine
+        from weizhcode.permissions.rules import parse_rule
+        from weizhcode.permissions.types import RuleSet
+        if "permissions" not in kwargs:
+            root = args[1].project_root
+            engine = PermissionEngine.load(root, user_home=root / ".sample-home")
+            engine.settings["local"] = replace(engine.settings["local"], rules=RuleSet(allow=tuple(
+                parse_rule(f"{tool}({path})") for tool in ("Write", "Edit") for path in ("fixture.txt", "summary.txt"))))
+            kwargs["permissions"] = engine
+        super().__init__(*args, **kwargs)
+
+    async def execute(self, slot, *, mode, cancel, emit, run_id=""):
         call, root = slot.call, self.context.project_root.resolve()
         allowed = call.name == "AskUserQuestion" and mode == "plan"
         if call.name in {"read_file", "write_file", "edit_file", "find_files", "search_content"}:
@@ -67,7 +79,7 @@ class SampleExecutor(ToolExecutor):
             cancel.set()
             slot.result = ToolResult.failure(call, "SMOKE_SCOPE", "验收样本范围外或命令调用：拒绝执行，已停止观察")
             return slot.result
-        return await super().execute(slot, mode=mode, cancel=cancel, emit=emit)
+        return await super().execute(slot, mode=mode, cancel=cancel, emit=emit, run_id=run_id)
 
 
 def observe_requests(provider, active):

@@ -102,3 +102,33 @@ async def test_grants(tmp_path):
     result = await e.accept(checked, ApprovalChoice.PERMANENT, cancel=cancel)
     assert not result.saved
     assert (await e.check(call(command="different"), mode="default", cancel=cancel)).decision == Decision.ASK
+
+
+async def test_command_pipeline_same_layer_deny(tmp_path):
+    from dataclasses import replace
+    e, cancel = engine(tmp_path), asyncio.Event()
+    e.settings["local"] = replace(e.settings["local"], rules=RuleSet(allow=(parse_rule("Bash"),), deny=(parse_rule("Bash(git push)"),)))
+    result = await e.check(call(command="git push"), mode="bypassPermissions", cancel=cancel)
+    assert result.decision == Decision.DENY and result.matched_layer == "local"
+    result = await e.check(call(command="git status"), mode="default", cancel=cancel)
+    assert result.decision == Decision.ALLOW
+
+
+async def test_grants_literal_and_cancel(tmp_path):
+    e, cancel = engine(tmp_path), asyncio.Event()
+    checked = await e.check(call(command="echo x"), mode="default", cancel=cancel)
+    cancel.set()
+    with pytest.raises(asyncio.CancelledError):
+        await e.accept(checked, ApprovalChoice.SESSION, cancel=cancel)
+    assert not e.session.allow
+    cancel.clear()
+    checked = await e.check(call(command="echo " + "x" * 8200), mode="default", cancel=cancel)
+    result = await e.accept(checked, ApprovalChoice.SESSION, cancel=cancel)
+    assert result.warning_code == "SESSION_NOT_SAVED" and not e.session.allow
+
+
+@pytest.mark.parametrize("name,args", [("unknown", {}), ("run_command", {}), ("read_file", {}), ("write_file", {"path": 7})])
+async def test_command_pipeline_invalid(tmp_path, name, args):
+    e = engine(tmp_path)
+    result = await e.check(call(name, **args), mode="bypassPermissions", cancel=asyncio.Event())
+    assert result.decision == Decision.DENY

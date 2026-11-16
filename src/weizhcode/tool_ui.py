@@ -5,6 +5,7 @@ import json
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
+from textual.css.query import NoMatches
 
 from weizhcode.redaction import Redactor
 
@@ -58,7 +59,10 @@ class ToolCallView(Vertical):
 
     def set_state(self, state):
         self.state = state
-        self.query_one(".tool-detail", Static).update(self.redactor.display(state))
+        try:
+            self.query_one(".tool-detail", Static).update(self.redactor.display(state))
+        except NoMatches:
+            pass  # The view may already have been unmounted during shutdown.
 
     def finish(self, result):
         self.summary = result_summary(result, self.redactor)
@@ -68,5 +72,5 @@ class ToolCallView(Vertical):
         self.set_state(label + ("\n" + self.summary if self.summary else ""))
 
     def invalidate(self):
-        if self.state in {"Receiving…", "Queued…", "Preparing…", "Running…", "等待回答…"}:
+        if self.state in {"Receiving…", "Queued…", "Checking permissions…", "Preparing…", "Running…", "等待回答…"}:
             self.set_state("已停止，状态以实际结果为准")

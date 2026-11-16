@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 from pathlib import Path
+import os
 
 from weizhcode.models import ToolContext
 from weizhcode.tools.process import ManagedWorker
@@ -82,6 +83,16 @@ class PermissionIO:
                            ("original", "canonical_target", "project_relative", "nearest_existing"))
                     or data["original"] != raw_path):
                 raise ValueError()
+            canonical = Path(data["canonical_target"])
+            if (not canonical.is_absolute() or ".." in canonical.parts
+                    or os.path.commonpath([os.path.normcase(str(canonical)), os.path.normcase(root.canonical_root)])
+                    != os.path.normcase(root.canonical_root)
+                    or data["project_relative"] != os.path.relpath(canonical, root.canonical_root).replace(os.sep, "/")):
+                raise ValueError()
+            identity = data.get("ancestor_identity")
+            if identity is not None and (not isinstance(identity, (list, tuple)) or len(identity) != 2
+                                         or any(type(v) is not int for v in identity)):
+                raise ValueError()
             return PathStamp(**data)
         except (ValueError, TypeError, KeyError):
             raise PermissionFailure("PATH_UNRESOLVED", "路径辅助响应无效") from None
@@ -93,7 +104,8 @@ class PermissionIO:
         try:
             result = SaveResult(**response["result"])
             if (type(result.saved) is not bool or type(result.already_present) is not bool
-                    or result.committed not in (None, True, False) or not isinstance(result.warning_code, str)):
+                    or (result.committed is not None and type(result.committed) is not bool)
+                    or not isinstance(result.warning_code, str) or (result.saved and result.committed is not True)):
                 raise ValueError()
             return result
         except (ValueError, TypeError, KeyError):

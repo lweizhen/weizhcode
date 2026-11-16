@@ -18,3 +18,8 @@ def test_windows(command):
 @pytest.mark.parametrize("command", ["git status", "rm -rf ./build/", "rm -rf /project/build", r"Remove-Item -Recurse -Force C:\project\build"])
 def test_posix_windows_safe(command):
     assert hits_blacklist(command) is None
+
+
+def test_posix_large_input():
+    assert hits_blacklist("git " + "a " * 100000) is None
+    assert hits_blacklist("rm -rf " + "a" * 100000 + "/project") is None

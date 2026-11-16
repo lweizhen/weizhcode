@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from weizhcode.permissions.types import PathStamp, PermissionMode
+from weizhcode.permissions.types import PathStamp, PermissionMode, RootIdentity
 
 
 ProtocolName = Literal["anthropic", "openai", "qwen"]
@@ -211,6 +211,7 @@ class ToolResult:
 @dataclass(frozen=True)
 class ToolContext:
     project_root: Path
+    permission_root: RootIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -236,6 +237,7 @@ class PreparedOperation:
     error: ToolResult | None = None
     operation_id: str = field(default_factory=lambda: uuid4().hex)
     permission_stamp: PathStamp | None = None
+    permission_root: RootIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -321,7 +323,7 @@ class TurnEvent:
     request_id: str = ""
     iteration: int = 0
     index: int = 0
-    mode: AgentMode = "normal"
+    mode: AgentMode = PermissionMode.DEFAULT
     max_iterations: int = MAX_ITERATIONS
     reason: str = ""
     usage: TokenUsage | None = None
@@ -377,7 +379,7 @@ class RoundResponse:
 
 @dataclass
 class RunContext:
-    mode: AgentMode = "normal"
+    mode: AgentMode = PermissionMode.DEFAULT
     run_id: str = field(default_factory=lambda: uuid4().hex)
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     consumer_closed: asyncio.Event = field(default_factory=asyncio.Event)

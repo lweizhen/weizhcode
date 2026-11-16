@@ -23,12 +23,23 @@ class SmokeExecutor(ToolExecutor):
     """仅限制线上测试样本的范围，不给产品新增沙箱或权限配置。"""
 
     def __init__(self, *args, **kwargs):
+        from dataclasses import replace
+        from weizhcode.permissions.engine import PermissionEngine
+        from weizhcode.permissions.rules import parse_rule
+        from weizhcode.permissions.types import RuleSet
+        if "permissions" not in kwargs:
+            root = args[1].project_root
+            engine = PermissionEngine.load(root, user_home=root / ".sample-home")
+            rules = tuple(parse_rule(f"{tool}({path})") for tool in ("Write", "Edit")
+                          for path in ("fixture.txt", "summary.txt", "planned.txt"))
+            engine.settings["local"] = replace(engine.settings["local"], rules=RuleSet(allow=rules))
+            kwargs["permissions"] = engine
         super().__init__(*args, **kwargs)
         self.allowed = set()
         self.allowed_paths = set()
         self.scope_error = False
 
-    async def execute(self, slot, *, mode, cancel, emit):
+    async def execute(self, slot, *, mode, cancel, emit, run_id=""):
         args = parse_tool_arguments(slot.call.raw_arguments)
         path = None if args is None else args.get("path", "." if slot.call.name in {"find_files", "search_content"} else None)
         root = self.context.project_root.resolve()
@@ -47,7 +58,7 @@ class SmokeExecutor(ToolExecutor):
                                              "线上验收超出临时样本范围，已停止；未执行本调用")
             slot.phase = "finished"
             return slot.result
-        return await super().execute(slot, mode=mode, cancel=cancel, emit=emit)
+        return await super().execute(slot, mode=mode, cancel=cancel, emit=emit, run_id=run_id)
 
 
 async def main():

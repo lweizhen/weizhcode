@@ -2,7 +2,8 @@ from dataclasses import asdict
 import json
 
 from weizhcode.redaction import Redactor
-from .contracts import EnvironmentSnapshot, PromptContext
+from .contracts import EnvironmentSnapshot, PromptContext, RuntimeSupplement, _APP_ORIGIN
+from weizhcode.permissions.modes import normalize_runtime_mode
 from .reminders import plan_reminder
 
 
@@ -32,5 +33,7 @@ def render_environment(snapshot: EnvironmentSnapshot, redactor: Redactor) -> str
 
 def build_prompt_context(stable_text, snapshot, *, mode, iteration, redactor=None):
     supplement = plan_reminder(mode, iteration)
+    mode = normalize_runtime_mode(mode)
+    permission = RuntimeSupplement("permission", f"当前权限模式：{mode.value}。遵守执行器的拒绝与审批结果，不通过命令绕过文件边界。需求答案不是执行许可。", _APP_ORIGIN)
     return PromptContext(stable_text, render_environment(snapshot, redactor or Redactor()),
-                         (supplement,) if supplement else ())
+                         (permission, supplement) if supplement else (permission,))

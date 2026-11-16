@@ -5,7 +5,21 @@ import pytest
 
 from weizhcode.models import ChatMessage, ToolCall, ToolContext, ToolResult, ToolSlot
 from weizhcode.tools import create_default_registry
-from weizhcode.tools.executor import ToolExecutor
+from weizhcode.tools.executor import ToolExecutor as _ToolExecutor
+
+def ToolExecutor(registry, context, *args, **kwargs):
+    # Explicit sample permissions for pre-permission business/lifecycle tests.
+    from dataclasses import replace
+    from test_permission_engine import MemoryIO
+    from weizhcode.permissions.engine import PermissionEngine
+    from weizhcode.permissions.rules import parse_rule
+    from weizhcode.permissions.types import RuleSet
+    if "permissions" not in kwargs:
+        engine = PermissionEngine.load(context.project_root, user_home=context.project_root / ".test-home", io=MemoryIO())
+        engine.settings["local"] = replace(engine.settings["local"],
+            rules=RuleSet(allow=tuple(parse_rule(name) for name in ("Write", "Edit", "Bash"))))
+        kwargs["permissions"] = engine
+    return _ToolExecutor(registry, context, *args, **kwargs)
 from weizhcode.user_questions import QuestionBroker
 
 
@@ -133,8 +147,8 @@ async def test_ask_question_runner_history_ownership_and_redaction(tmp_path):
     assert events[-1].reason == "completed" and events[-1].iteration == 2
     assert len(provider.requests) == 2 and runner.mode == "plan"
     assert capture.calls == 1 and runner.usage_totals.request_count == 2
-    assert provider.requests[0][1]["prompt_context"].supplements[0].text == FULL_PLAN_REMINDER
-    assert provider.requests[1][1]["prompt_context"].supplements[0].text == BRIEF_PLAN_REMINDER
+    assert provider.requests[0][1]["prompt_context"].supplements[-1].text == FULL_PLAN_REMINDER
+    assert provider.requests[1][1]["prompt_context"].supplements[-1].text == BRIEF_PLAN_REMINDER
     assert [m.role for m in conv.messages()] == ["user","assistant","tool","assistant"]
     assert "[redacted]" in conv.messages()[2].tool_results[0].content
     runner.unbind_questions(token)

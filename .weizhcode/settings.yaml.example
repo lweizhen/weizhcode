@@ -1,0 +1,15 @@
+# 权限配置，与 weizhcode.yaml 的模型供应商配置分开。
+# 用户 ~/.weizhcode/settings.yaml < 项目 .weizhcode/settings.yaml
+# < 本地 .weizhcode/settings.local.yaml < 本会话精确许可。
+# 同层 deny 优先；黑名单、文件路径围栏与 plan 硬限制不可绕过。
+default_mode: default
+permissions:
+  allow:
+    - 'Bash(git status)'
+    # 'Bash(git *)' 是全命令串 glob，可能覆盖复合命令，不等于安全 git 沙箱。
+    - 'Write(src/**)'
+  deny:
+    - 'Bash(git push*)'
+    - 'Read(.env)'
+    - 'Write(.env)'
+# Read deny 不自动限制 Grep 或获准命令。坏配置整文件跳过，deny 可能失效。

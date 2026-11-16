@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 import stat
@@ -10,7 +9,7 @@ import yaml
 
 from .rules import exact_rule, rule_key
 from .sandbox import recheck, resolve_target
-from .settings import MAX_BYTES, parse_settings, read_settings
+from .settings import parse_settings, read_settings
 from .types import PermissionFailure, SaveResult
 
 

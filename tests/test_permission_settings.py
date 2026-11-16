@@ -40,3 +40,17 @@ def test_layers(tmp_path):
     settings, warnings, _ = load_layers(root, home)
     assert settings["project"].default_mode == PermissionMode.BYPASS
     assert settings["local"].rules.deny == () and warnings[0].layer == "local"
+
+
+def test_safe_load_exact_limits():
+    assert parse_settings(b" " * MAX_BYTES).data == {}
+    raw = ("permissions:\n  allow:\n" + "    - Bash\n" * 1024).encode()
+    assert len(parse_settings(raw).rules.allow) == 1024
+    value = "Bash(" + "x" * (8192 - 6) + ")"
+    assert len(value) == 8192
+    assert len(parse_settings(("permissions:\n  allow:\n    - " + value).encode()).rules.allow) == 1
+    with pytest.raises(PermissionFailure):
+        parse_settings(("permissions:\n  allow:\n    - " + value[:-1] + "x)").encode())
+    assert parse_settings(("x: " + "[" * 14 + "0" + "]" * 14).encode()).data
+    with pytest.raises(PermissionFailure):
+        parse_settings(("x: " + "[" * 15 + "0" + "]" * 15).encode())

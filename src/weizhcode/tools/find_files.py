@@ -2,7 +2,7 @@ from pathlib import Path
 
 from weizhcode.models import PreparedOperation, ToolDefinition, ToolResult
 from weizhcode.tools.base import BaseTool, TEXT, schema
-from weizhcode.tools.file_utils import original_path
+from weizhcode.tools.file_utils import original_path, guard_path
 from weizhcode.tools.limits import MAX_FILE_MATCHES, MAX_RESULT_CHARS
 from weizhcode.tools.search_utils import SearchWalk, match_glob
 
@@ -19,13 +19,14 @@ class FindFilesTool(BaseTool):
 
     def _prepare(self, call, context):
         args = dict(call.arguments or {})
-        root = original_path(str(args.get("path", ".")), context).resolve()
+        root = guard_path(original_path(str(args.get("path", ".")), context))
         if not root.is_dir():
             raise FileNotFoundError(str(root))
         return PreparedOperation(call, args, str(root), str(root))
 
     def _execute(self, operation, context):
-        walk = SearchWalk(Path(operation.target), include_hidden=operation.arguments.get("include_hidden", False),
+        walk = SearchWalk(Path(operation.target), project_root=context.project_root,
+                          include_hidden=operation.arguments.get("include_hidden", False),
                           include_ignored=operation.arguments.get("include_ignored", False))
         paths = []
         size = 0
@@ -48,6 +49,7 @@ class FindFilesTool(BaseTool):
         return ToolResult(operation.call.call_id, self.definition.name, content,
                           status="error" if walk.errors else "success",
                           error_code="SEARCH_INCOMPLETE" if walk.errors else None,
-                          metadata={"root": str(walk.root), "count": len(paths), "errors": walk.errors},
+                          metadata={"root": str(walk.root), "count": len(paths), "errors": walk.errors,
+                                    "sandbox_skipped": walk.sandbox_skipped},
                           truncated=truncated)
 

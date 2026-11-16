@@ -58,7 +58,7 @@ class ToolScheduler:
                         cancelled(slot)
                         return
                     result = await self.executor.execute(slot, mode=context.mode,
-                                                         cancel=context.cancel_event, emit=send)
+                                                         cancel=context.cancel_event, emit=send, run_id=context.run_id)
                     if slot.result is None:
                         slot.result = result
                     if slot.result is None:

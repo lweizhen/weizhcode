@@ -10,7 +10,7 @@ async def test_loop_security_pipeline_events_safe_actual_bytes_preserved(tmp_pat
     from weizhcode.conversation import Conversation
     from weizhcode.models import ToolCall, ToolContext
     from weizhcode.tools import create_default_registry
-    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import ToolExecutor
     from weizhcode.turn_runner import TurnRunner
     from test_turn_runner import FakeProvider, reply
     from test_command_tool import python_command

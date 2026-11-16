@@ -13,6 +13,8 @@ from weizhcode.redaction import Redactor
 from weizhcode.tools import create_default_registry
 from weizhcode.tools.executor import ToolExecutor
 from weizhcode.turn_runner import TurnRunner
+from weizhcode.permissions.engine import PermissionEngine
+from weizhcode.approvals import ApprovalBroker
 
 
 def main() -> None:
@@ -28,7 +30,10 @@ def main() -> None:
     redactor = Redactor(p.api_key for p in config.providers if not ENV_REF_RE.fullmatch(p.api_key))
     conversation = Conversation()
     registry = create_default_registry()
-    executor = ToolExecutor(registry, ToolContext(Path.cwd()), redactor)
+    permissions = PermissionEngine.load(Path.cwd())
+    root = Path(permissions.root.canonical_root) if permissions.root else Path.cwd()
+    executor = ToolExecutor(registry, ToolContext(root), redactor, permissions=permissions,
+                            approvals=ApprovalBroker(redactor))
     runner = TurnRunner(provider, conversation, registry, executor, redactor)
     WeizhCodeApp(
         provider,
@@ -37,6 +42,6 @@ def main() -> None:
         redactor=redactor,
         provider_name=provider_config.name,
         model=provider_config.model,
-        project_path=str(Path.cwd()),
+        project_path=str(root),
         version=__version__,
     ).run()

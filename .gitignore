@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 
 weizhcode.yaml
+.weizhcode/settings.local.yaml
+.weizhcode/.settings.local.*.tmp

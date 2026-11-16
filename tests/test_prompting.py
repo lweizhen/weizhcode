@@ -84,7 +84,7 @@ def test_render_safe_bounded_and_static_unchanged():
     data = json.loads(body)
     assert "secret" not in body and "\x1b" not in body and "<" not in body
     assert "[truncated]" in data["project_root"]
-    assert context.stable_text == "stable" and len(context.supplements) == 1
+    assert context.stable_text == "stable" and len(context.supplements) == 2
     assert snapshot.project_root.startswith("secret")
     assert "快照" in context.environment_text
 

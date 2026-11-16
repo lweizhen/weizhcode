@@ -104,7 +104,10 @@ class PermissionEngine:
             raise PermissionFailure("PERMISSION_UNAVAILABLE", "审批不属于当前有效请求")
         target = await self.recheck(checked, cancel=cancel)
         if choice == ApprovalChoice.SESSION:
-            rule = exact_rule(target)
+            try:
+                rule = exact_rule(target)
+            except PermissionFailure:
+                return SaveResult(warning_code="SESSION_NOT_SAVED")
             if not any(rule_key(r) == rule_key(rule) for r in self.session.allow):
                 self.session = RuleSet((*self.session.allow, rule))
         elif choice == ApprovalChoice.PERMANENT:

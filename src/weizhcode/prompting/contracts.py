@@ -50,12 +50,12 @@ class EnvironmentSnapshot:
 
 @dataclass(frozen=True)
 class RuntimeSupplement:
-    kind: Literal["plan"]
+    kind: Literal["plan", "permission"]
     text: str
     _origin: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
-        if self._origin is not _APP_ORIGIN or self.kind != "plan" or not isinstance(self.text, str):
+        if self._origin is not _APP_ORIGIN or self.kind not in {"plan", "permission"} or not isinstance(self.text, str):
             raise ValueError("补充上下文必须由应用工厂生成")
 
 

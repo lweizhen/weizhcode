@@ -17,7 +17,7 @@ class FakeExecutor:
     def __init__(self, gates=None, callback=None):
         self.gates, self.callback = gates or {}, callback
         self.started, self.active, self.peak, self.log = [], set(), 0, []
-    async def execute(self, slot, *, mode, cancel, emit):
+    async def execute(self, slot, *, mode, cancel, emit, run_id=""):
         i = slot.index
         self.started.append(i)
         self.active.add(i)
@@ -101,7 +101,7 @@ async def test_readonly_concurrency_limit_and_cancel_waiters():
 
 async def test_readonly_concurrency_limit_wait_time_excluded_from_tool_budget(tmp_path):
     from weizhcode.models import ToolContext
-    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import ToolExecutor
     from test_tool_executor import LoopWorker
     workers = []
     def factory():

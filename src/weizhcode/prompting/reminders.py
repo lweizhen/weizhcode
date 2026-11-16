@@ -1,4 +1,5 @@
 from .contracts import RuntimeSupplement, _APP_ORIGIN
+from weizhcode.permissions.modes import normalize_runtime_mode
 
 
 FULL_PLAN_REMINDER = """当前是计划模式：使用 read_file、find_files、search_content 进行只读调查。
@@ -10,9 +11,10 @@ BRIEF_PLAN_REMINDER = "当前仍是计划模式：只读调查，必要时用 As
 
 
 def plan_reminder(mode: str, iteration: int) -> RuntimeSupplement | None:
-    if mode not in {"normal", "plan"} or type(iteration) is not int or iteration < 1:
+    mode = normalize_runtime_mode(mode)
+    if type(iteration) is not int or iteration < 1:
         raise ValueError("非法模式或请求轮次")
-    if mode == "normal":
+    if mode != "plan":
         return None
     text = FULL_PLAN_REMINDER if (iteration - 1) % 4 == 0 else BRIEF_PLAN_REMINDER
     return RuntimeSupplement("plan", text, _APP_ORIGIN)

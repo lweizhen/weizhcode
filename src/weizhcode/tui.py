@@ -23,6 +23,10 @@ from weizhcode.tools import create_default_registry
 from weizhcode.tools.executor import ToolExecutor
 from weizhcode.turn_runner import TurnRunner
 from weizhcode.tool_ui import ToolCallView
+from weizhcode.approval_ui import ApprovalView, LABELS, CHOICES
+from weizhcode.permissions.engine import PermissionEngine
+from weizhcode.permissions.modes import next_mode, normalize_runtime_mode
+from weizhcode.permissions.types import PermissionMode
 
 
 LOGO = r""" /\_/\ 
@@ -241,6 +245,7 @@ class WeizhCodeApp(App[None]):
         Binding("escape", "cancel_task", "Cancel", priority=True),
         Binding("ctrl+c", "interrupt", "Cancel / Quit", priority=True),
         Binding("ctrl+d", "quit", "Quit", priority=True),
+        Binding("shift+tab", "cycle_permissions", "Permission mode", priority=True),
     ]
 
     def __init__(
@@ -272,7 +277,9 @@ class WeizhCodeApp(App[None]):
         self.redactor = redactor or Redactor()
         if runner is None:
             registry = create_default_registry()
-            executor = ToolExecutor(registry, ToolContext(Path(project_path)), self.redactor)
+            permissions = PermissionEngine.load(Path(project_path))
+            root = Path(permissions.root.canonical_root) if permissions.root else Path(project_path)
+            executor = ToolExecutor(registry, ToolContext(root), self.redactor, permissions=permissions)
             runner = TurnRunner(provider, conversation, registry, executor, self.redactor)
         self.runner = runner
         self._tool_views = {}
@@ -291,6 +298,10 @@ class WeizhCodeApp(App[None]):
         self._pending_question = None
         self._question_view = None
         self._question_connection = None
+        self._approval_connection = None
+        self._pending_approval = None
+        self._approval_view = None
+        self._approval_draft = ""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
@@ -303,16 +314,25 @@ class WeizhCodeApp(App[None]):
         yield VerticalScroll(id="messages")
         yield ChatInput(id="input")
         with Horizontal(id="footer"):
-            yield Static(self.redactor.display(self.ui.provider_name), id="footer-left", markup=False)
+            yield Static("DEFAULT", id="footer-left", markup=False)
             yield Static(self.redactor.display(self.ui.model), id="footer-right", markup=False)
 
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         await self.submit_text(event.value)
 
-    def on_mount(self):
+    async def on_mount(self):
         self.query_one(ChatInput).focus()
         if hasattr(self.runner, "bind_questions"):
             self._question_connection = self.runner.bind_questions()
+        if hasattr(self.runner, "bind_approvals"):
+            self._approval_connection = self.runner.bind_approvals()
+        engine = getattr(getattr(self.runner, "executor", None), "permissions", None)
+        if engine is not None:
+            for warning in engine.warnings:
+                await self._append_message("notice", self.redactor.display(
+                    f"权限配置未生效：{warning.layer} · {warning.path} · {warning.code}；该文件内 deny 可能失效，请检查后重启。"))
+            if engine.root is None:
+                await self._append_message("notice", "项目根不可用，工具将拒绝执行；仍可纯聊天。")
         self.set_interval(.1, self._update_status)
         self._update_status()
 
@@ -325,12 +345,23 @@ class WeizhCodeApp(App[None]):
         usage = f"↑{inputs} ↓{outputs}"
         if totals.incomplete_requests:
             usage += f" · 统计不完整（{totals.incomplete_requests} 次请求）"
-        mode = "Plan · 只读" if self._mode == "plan" else "Normal"
+        current = normalize_runtime_mode(self._mode)
+        labels = {PermissionMode.DEFAULT: "DEFAULT", PermissionMode.ACCEPT_EDITS: "ACCEPT EDITS",
+                  PermissionMode.PLAN: "PLAN", PermissionMode.BYPASS: "BYPASS"}
+        mode = labels[current]
+        try:
+            footer = self.query_one("#footer-left", Static)
+            footer.update(mode)
+            footer.styles.color = "#ef7777" if current == PermissionMode.BYPASS else "#999999"
+        except NoMatches:
+            return  # The periodic callback may race screen teardown.
         progress = "Ready"
         if self.is_generating:
             progress = f"Iteration {self._iteration}/{self._max_iterations}"
             if self._cancel_requested:
                 progress += " · 正在取消并清理…"
+            elif self._pending_approval is not None:
+                progress += " · 等待你的批准…"
             elif self._pending_question is not None:
                 progress += " · 等待你的回答…"
             elif self._active_tools:
@@ -353,6 +384,9 @@ class WeizhCodeApp(App[None]):
             return
         if content in {"/exit", "/quit"}:
             await self.action_quit()
+            return
+        if self._pending_approval is not None:
+            await self._append_message("notice", "请使用审批菜单选择，或按 Esc 取消；输入不会成为授权。")
             return
         if self._pending_question is not None:
             if content in {"/plan", "/do"}:
@@ -426,7 +460,22 @@ class WeizhCodeApp(App[None]):
             self._active_run_id = event.run_id
         if event.run_id != self._active_run_id:
             return
-        if event.type == "question_request" and event.question is not None:
+        if event.type == "approval_request" and event.approval is not None:
+            if self._pending_question is not None or self._pending_approval is not None:
+                self.runner.cancel_current()
+                return
+            self._approval_draft = self.query_one(ChatInput).text
+            self.query_one(ChatInput).disabled = True
+            self._approval_view = ApprovalView(event.approval)
+            await self.query_one("#messages", VerticalScroll).mount(self._approval_view)
+            self._approval_view.focus()
+            self._pending_approval = event.approval
+            await self._scroll_to_end()
+            self._text_view = self._text_key = None
+        elif event.type == "approval_resolved" and event.approval is not None:
+            if self._pending_approval is not None and self._pending_approval.approval_id == event.approval.approval_id:
+                self._clear_approval("审批已取消" if self._cancel_requested else "选择已接收，等待执行结果")
+        elif event.type == "question_request" and event.question is not None:
             self._pending_question = event.question
             view = self._tool_views.get((event.run_id, event.local_id))
             if view is not None:
@@ -448,14 +497,14 @@ class WeizhCodeApp(App[None]):
                 self._text_key = key
             self._text_view.append_text(self.redactor.display(event.text))
             await self._scroll_to_end()
-        elif event.type in {"tool_pending", "tool_start", "tool_preparing", "tool_running", "tool_result"}:
+        elif event.type in {"tool_pending", "tool_start", "tool_checking", "tool_preparing", "tool_running", "tool_result"}:
             view = await self._tool_view(event)
             if view is not None:
                 if event.type == "tool_result" and event.result is not None:
                     view.finish(event.result)
                     self._active_tools.pop(event.local_id, None)
                 else:
-                    state = {"tool_pending": "Receiving…", "tool_start": "Queued…",
+                    state = {"tool_pending": "Receiving…", "tool_start": "Queued…", "tool_checking": "Checking permissions…",
                              "tool_preparing": "Preparing…", "tool_running": "Running…"}[event.type]
                     view.set_state(state)
                     self._active_tools[event.local_id] = self.redactor.display(view.call.name) + " " + state
@@ -470,11 +519,12 @@ class WeizhCodeApp(App[None]):
                 self._text_view.append_text("\n[本次回复未完成]")
             await self.show_error(event.text)
         elif event.type == "turn_done":
+            self._clear_approval("审批已结束")
             if self._pending_question is not None and self._question_view is not None:
                 self._question_view.append_text("\n[提问已结束，未收到回答]")
             self._pending_question = self._question_view = None
             for view in self._tool_views.values():
-                if view.state in {"Receiving…", "Queued…", "Preparing…", "Running…", "等待回答…"}:
+                if view.state in {"Receiving…", "Queued…", "Checking permissions…", "Preparing…", "Running…", "等待回答…"}:
                     view.set_state("未执行：响应未完成/已取消" if view.state != "Running…" else "已停止，结果未确认")
             if event.totals is not None:
                 self._totals = event.totals
@@ -508,6 +558,38 @@ class WeizhCodeApp(App[None]):
             self._cancel_requested = True
             self._update_status()
 
+    async def action_cycle_permissions(self):
+        if self.is_generating or self.runner.busy or self._tools_closing:
+            await self._append_message("notice", "当前任务尚未结束，权限模式未改变。")
+            return
+        await self._consume_event(self.runner.set_mode(next_mode(self.runner.mode)))
+
+    async def on_approval_view_chosen(self, event: ApprovalView.Chosen):
+        event.stop()
+        request = self._pending_approval
+        if request is None or event.view is not self._approval_view or not event.view.active:
+            return
+        accepted, message = self.runner.submit_approval(self._active_run_id, request.approval_id, event.choice)
+        if accepted:
+            event.view.finish("已选择：" + LABELS[CHOICES.index(event.choice)])
+        else:
+            await self._append_message("notice", self.redactor.display(message))
+
+    def _clear_approval(self, outcome):
+        if self._pending_approval is None:
+            return
+        if self._approval_view is not None and self._approval_view.active:
+            self._approval_view.finish(outcome)
+        self._pending_approval = self._approval_view = None
+        try:
+            entry = self.query_one(ChatInput)
+            entry.disabled = False
+            entry.text = self._approval_draft
+            entry.focus()
+        except NoMatches:
+            pass
+        self._approval_draft = ""
+
     async def action_interrupt(self):
         if self.is_generating or self.runner.busy:
             self.action_cancel_task()
@@ -516,6 +598,10 @@ class WeizhCodeApp(App[None]):
 
     async def _shutdown_tools(self):
         self._tools_closing = True
+        if self._approval_connection is not None:
+            self.runner.unbind_approvals(self._approval_connection)
+            self._approval_connection = None
+        self._clear_approval("审批随退出结束")
         if self._question_connection is not None:
             self.runner.unbind_questions(self._question_connection)
             self._question_connection = None

@@ -49,7 +49,21 @@ import pytest
 from weizhcode.models import ToolResult
 from weizhcode.redaction import Redactor
 from weizhcode.tools import create_default_registry
-from weizhcode.tools.executor import ToolExecutor
+from weizhcode.tools.executor import ToolExecutor as _ToolExecutor
+
+def ToolExecutor(registry, context, *args, **kwargs):
+    # Explicit sample permissions for pre-permission business/lifecycle tests.
+    from dataclasses import replace
+    from test_permission_engine import MemoryIO
+    from weizhcode.permissions.engine import PermissionEngine
+    from weizhcode.permissions.rules import parse_rule
+    from weizhcode.permissions.types import RuleSet
+    if "permissions" not in kwargs:
+        engine = PermissionEngine.load(context.project_root, user_home=context.project_root / ".test-home", io=MemoryIO())
+        engine.settings["local"] = replace(engine.settings["local"],
+            rules=RuleSet(allow=tuple(parse_rule(name) for name in ("Write", "Edit", "Bash"))))
+        kwargs["permissions"] = engine
+    return _ToolExecutor(registry, context, *args, **kwargs)
 from weizhcode.tools.process import ManagedWorker, WindowsJob
 from weizhcode.tools import process as process_module
 
@@ -79,7 +93,7 @@ async def test_loop_execute_basic_write_read_and_errors(tmp_path):
     result, slot, events = await execute_slot(executor, tool_call("write_file", path="sub/a", content="hello"))
     assert result.status == "success" and slot.execution_started
     assert (tmp_path / "sub/a").read_text() == "hello"
-    assert [e.type for e in events] == ["tool_preparing", "tool_running"]
+    assert [e.type for e in events] == ["tool_checking", "tool_preparing", "tool_running"]
     result, _, _ = await execute_slot(executor, tool_call("read_file", path="sub/a"))
     assert "hello" in result.content
     result, _, _ = await execute_slot(executor, tool_call("read_file", path="missing"))
@@ -112,11 +126,11 @@ class LoopWorker:
         self.closed = False
         self.call = None
     async def start(self, context):
-        pass
-    async def prepare(self, call):
+        self.context = context
+    async def prepare(self, call, **kwargs):
         self.call = call
         await asyncio.sleep(self.prepare_delay)
-        return PreparedOperationPreview("operation", "", "")
+        return PreparedOperationPreview("operation", str(self.context.project_root / call.arguments["path"]), "")
     async def execute(self, operation):
         self.running.set()
         await asyncio.sleep(self.execute_delay)
@@ -240,8 +254,8 @@ async def test_loop_process_cleanup_cancel_preparing_and_creation(tmp_path, monk
 async def test_loop_process_cleanup_cancel_real_prepare_phase(tmp_path):
     entered, cancel = asyncio.Event(), asyncio.Event()
     class PreparingWorker(ManagedWorker):
-        async def prepare(self, call):
-            result = await super().prepare(call)
+        async def prepare(self, call, **kwargs):
+            result = await super().prepare(call, **kwargs)
             entered.set()
             await asyncio.Event().wait()
             return result
@@ -366,11 +380,13 @@ async def test_worker_protocol_rejects_wrong_state(tmp_path):
 
 
 async def test_managed_worker_read_and_duplicate_execute(tmp_path):
+    from weizhcode.permissions.sandbox import make_root, resolve_target
     (tmp_path / "a").write_text("hello")
+    root = make_root(tmp_path)
     worker = ManagedWorker()
     try:
-        await worker.start(ToolContext(tmp_path))
-        preview = await worker.prepare(tool_call("read_file", path="a"))
+        await worker.start(ToolContext(tmp_path, root))
+        preview = await worker.prepare(tool_call("read_file", path="a"), permission_stamp=resolve_target("a", root))
         result = await worker.execute(preview.operation_id)
         assert "hello" in result.content
         with pytest.raises(Exception, match="状态"):
@@ -412,7 +428,7 @@ async def test_executor_readonly_no_approval(tmp_path, name, args):
     (tmp_path / "a").write_text("hello")
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path))
     events = await collect(executor, tool_call(name, **args))
-    assert [e.type for e in events] == ["tool_preparing", "tool_running", "tool_result"]
+    assert [e.type for e in events] == ["tool_checking", "tool_preparing", "tool_running", "tool_result"]
     assert not events[-1].result.is_error
     assert not executor._active
 
@@ -420,15 +436,15 @@ async def test_executor_readonly_no_approval(tmp_path, name, args):
 @pytest.mark.parametrize("mode", ["normal", "plan"])
 async def test_executor_no_early_write_and_plan_gate(tmp_path, mode):
     class CheckedWorker(ManagedWorker):
-        async def prepare(self, call):
-            preview = await super().prepare(call)
+        async def prepare(self, call, **kwargs):
+            preview = await super().prepare(call, **kwargs)
             assert not (tmp_path / "sub").exists()
             return preview
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), worker_factory=CheckedWorker)
     events = await collect(executor, tool_call("write_file", path="sub/a", content="hello"), mode=mode)
     result = events[-1].result
     assert (tmp_path / "sub/a").exists() is (mode == "normal")
-    assert result.status == ("success" if mode == "normal" else "error")
+    assert result.status == ("success" if mode == "normal" else "denied")
     assert not list(tmp_path.rglob(".weizhcode-*.tmp"))
 
 
@@ -436,8 +452,8 @@ async def test_executor_stale_after_prepare_does_not_overwrite(tmp_path):
     path = tmp_path / "a"
     path.write_text("old")
     class ChangedWorker(ManagedWorker):
-        async def prepare(self, call):
-            preview = await super().prepare(call)
+        async def prepare(self, call, **kwargs):
+            preview = await super().prepare(call, **kwargs)
             path.write_text("external")
             return preview
     executor = ToolExecutor(create_default_registry(), ToolContext(tmp_path), worker_factory=ChangedWorker)
@@ -458,11 +474,12 @@ class SlowWorker:
         self.partial = {"stdout": "", "stderr": ""}
         self.closed = False
     async def start(self, context):
+        self.context = context
         await asyncio.sleep(.02)
-    async def prepare(self, call):
+    async def prepare(self, call, **kwargs):
         await asyncio.sleep(.02)
         self.call = call
-        return PreparedOperationPreview("operation", "target", "preview")
+        return PreparedOperationPreview("operation", str(self.context.project_root / call.arguments["path"]), "preview")
     async def execute(self, operation_id):
         await asyncio.sleep(.04)
         return ToolResult(self.call.call_id, self.call.name, "ok")

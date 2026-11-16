@@ -3,10 +3,11 @@ from pathlib import Path
 
 from weizhcode.models import PreparedOperation, ToolDefinition, ToolResult
 from weizhcode.tools.base import BaseTool, TEXT, ToolFailure, schema
-from weizhcode.tools.file_utils import bounded_lines, original_path
+from weizhcode.tools.file_utils import bounded_lines, original_path, guard_path
 from weizhcode.tools.find_files import SEARCH_OPTIONS
 from weizhcode.tools.limits import MAX_CONTENT_MATCHES, MAX_RESULT_CHARS
 from weizhcode.tools.search_utils import SearchWalk
+from weizhcode.permissions.types import PermissionFailure
 
 
 class SearchContentTool(BaseTool):
@@ -16,7 +17,7 @@ class SearchContentTool(BaseTool):
 
     def _prepare(self, call, context):
         args = dict(call.arguments or {})
-        root = original_path(str(args.get("path", ".")), context).resolve()
+        root = guard_path(original_path(str(args.get("path", ".")), context))
         if not root.is_dir():
             raise FileNotFoundError(str(root))
         rx = None
@@ -28,7 +29,8 @@ class SearchContentTool(BaseTool):
         return PreparedOperation(call, args, str(root), str(root), state={"rx": rx})
 
     def _execute(self, operation, context):
-        walk = SearchWalk(Path(operation.target), include_hidden=operation.arguments.get("include_hidden", False),
+        walk = SearchWalk(Path(operation.target), project_root=context.project_root,
+                          include_hidden=operation.arguments.get("include_hidden", False),
                           include_ignored=operation.arguments.get("include_ignored", False))
         rx = operation.state["rx"]
         pattern = str(operation.arguments["pattern"])
@@ -60,6 +62,9 @@ class SearchContentTool(BaseTool):
                 walk.skipped_files += 1
             except OSError as exc:
                 walk.error(path, exc)
+            except PermissionFailure:
+                walk.sandbox_skipped += 1
+                walk.error(path, PermissionError("路径已变化"))
             if truncated:
                 break
         incomplete = bool(walk.errors or walk.long_lines)
@@ -72,5 +77,6 @@ class SearchContentTool(BaseTool):
                           status="error" if incomplete else "success",
                           error_code="SEARCH_INCOMPLETE" if incomplete else None,
                           metadata={"count": len(results), "skipped_files": walk.skipped_files,
-                                    "long_lines": walk.long_lines, "errors": walk.errors}, truncated=truncated)
+                                    "long_lines": walk.long_lines, "errors": walk.errors,
+                                    "sandbox_skipped": walk.sandbox_skipped}, truncated=truncated)
 

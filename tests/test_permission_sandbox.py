@@ -41,3 +41,43 @@ def test_resolution_recheck(tmp_path):
     assert recheck(stamp, identity).canonical_target == stamp.canonical_target
     with pytest.raises(PermissionFailure):
         resolve_target("x\0y", identity)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 路径原生分支")
+def test_windows(tmp_path):
+    root = make_root(tmp_path)
+    assert resolve_target(str(tmp_path / "x"), root).project_relative == "x"
+    assert resolve_target("\\\\?\\" + str(tmp_path / "x"), root).project_relative == "x"
+    for path in (r"\\.\PhysicalDrive0", str(tmp_path / "x") + ":stream", "C:relative", "NUL"):
+        with pytest.raises(PermissionFailure):
+            resolve_target(path, root)
+    for path in ("Z:\\outside", r"\\nonexistent-permission-test\share\outside"):
+        with pytest.raises(PermissionFailure):
+            resolve_target(path, root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction 原生分支")
+def test_windows_junction_resolution(tmp_path):
+    import subprocess
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    link = root / "link"
+    assert link.parent.resolve() == root.resolve() and outside.parent.resolve() == tmp_path.resolve()
+    created = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    if created.returncode:
+        pytest.skip("本机不能创建 junction")
+    for path in ("link/a", "link/../a", "missing/../link/a"):
+        with pytest.raises(PermissionFailure):
+            resolve_target(path, make_root(root))
+
+
+def test_root_changed(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    identity = make_root(root)
+    root.rename(tmp_path / "old")
+    root.mkdir()
+    with pytest.raises(PermissionFailure):
+        resolve_target("file", identity)

@@ -1,4 +1,11 @@
 from pathlib import Path
+import pytest
+
+@pytest.fixture(autouse=True)
+def isolated_permissions(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+
 
 from weizhcode import cli
 from weizhcode.models import AppConfig, ProviderConfig
@@ -26,7 +33,7 @@ def test_loop_startup_wiring_new_components_share_dependencies(monkeypatch, tmp_
     assert runner.scheduler.executor is runner.executor
     assert runner.scheduler.registry is runner.registry
     assert runner.redactor.secrets == ("active-key",)
-    assert runner.mode == "normal" and runner.max_iterations == 25
+    assert runner.mode == "default" and runner.max_iterations == 25
 
 
 async def test_manual_smoke_scope_rejects_outside_without_worker(tmp_path):

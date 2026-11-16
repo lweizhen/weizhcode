@@ -12,7 +12,21 @@ from weizhcode.models import ChatMessage, ProviderEvent, ToolCall, ToolContext, 
 from weizhcode.redaction import Redactor
 from weizhcode.tool_ui import ToolCallView, result_summary
 from weizhcode.tools import create_default_registry
-from weizhcode.tools.executor import ToolExecutor
+from weizhcode.tools.executor import ToolExecutor as _ToolExecutor
+
+def ToolExecutor(registry, context, *args, **kwargs):
+    # Explicit sample permissions for pre-permission business/lifecycle tests.
+    from dataclasses import replace
+    from test_permission_engine import MemoryIO
+    from weizhcode.permissions.engine import PermissionEngine
+    from weizhcode.permissions.rules import parse_rule
+    from weizhcode.permissions.types import RuleSet
+    if "permissions" not in kwargs:
+        engine = PermissionEngine.load(context.project_root, user_home=context.project_root / ".test-home", io=MemoryIO())
+        engine.settings["local"] = replace(engine.settings["local"],
+            rules=RuleSet(allow=tuple(parse_rule(name) for name in ("Write", "Edit", "Bash"))))
+        kwargs["permissions"] = engine
+    return _ToolExecutor(registry, context, *args, **kwargs)
 from weizhcode.turn_runner import TurnRunner
 from weizhcode.tui import ChatInput, MessageView, ErrorDialog, WeizhCodeApp
 from test_turn_runner import FakeProvider, reply
@@ -160,10 +174,10 @@ async def test_loop_mode_usage_ui_snapshots_and_do(tmp_path):
         await app.submit_text("plan task")
         await wait_for(pilot, lambda: not app.is_generating)
         status = str(app.query_one("#status", Static).render())
-        assert "Plan" in status and "↑10 ↓2" in status and "7 tools" in status
+        assert "PLAN" in status and "↑10 ↓2" in status and "7 tools" in status
         await app.submit_text("/do")
         await wait_for(pilot, lambda: not app.is_generating)
-        assert app.runner.mode == "normal" and len(app.provider.requests) == 2
+        assert app.runner.mode == "default" and len(app.provider.requests) == 2
         assert app.provider.requests[-1][0][-1].content == "请按上面的计划开始执行。"
         assert "统计不完整" in str(app.query_one("#status", Static).render())
 
@@ -214,7 +228,7 @@ async def test_loop_ui_race_isolation_busy_draft_and_late_ids(tmp_path):
         for content in ("/plan", "/do", "duplicate"):
             await app.submit_text(content)
         assert app.query_one(ChatInput).text == "保留草稿"
-        assert len(provider.requests) == 1 and app.runner.mode == "normal"
+        assert len(provider.requests) == 1 and app.runner.mode == "default"
         await app._consume_event(TurnEvent("text_delta", text="wrong", run_id="old", iteration=1))
         await app._consume_event(TurnEvent("turn_done", run_id="old"))
         assert app.is_generating
@@ -279,8 +293,8 @@ async def test_loop_production_path_stale_write_no_overwrite(tmp_path):
     call = ToolCall("id", "write_file", json.dumps({"path": str(target), "content": "new"}))
     app = app_for(tmp_path, [reply("", (call,)), reply("文件已变化")])
     class ChangedWorker(ManagedWorker):
-        async def prepare(self, call):
-            preview = await super().prepare(call)
+        async def prepare(self, call, **kwargs):
+            preview = await super().prepare(call, **kwargs)
             target.write_text("user update", encoding="utf-8")
             return preview
     app.runner.executor.worker_factory = ChangedWorker
@@ -342,8 +356,8 @@ async def test_app_shutdown_prepared_write_before_execute(tmp_path):
     call = ToolCall("id", "write_file", json.dumps({"path": str(target), "content": "never"}))
     app = app_for(tmp_path, [reply("", (call,)), reply("must not request")])
     class WaitingPrepare(ManagedWorker):
-        async def prepare(self, call):
-            preview = await super().prepare(call)
+        async def prepare(self, call, **kwargs):
+            preview = await super().prepare(call, **kwargs)
             entered.set()
             await asyncio.Event().wait()
             return preview

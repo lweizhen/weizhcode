@@ -42,8 +42,12 @@ class ToolRegistry:
         return tool is not None and tool.definition.read_only is True
 
     def definitions_for_mode(self, mode):
+        from weizhcode.permissions.modes import normalize_runtime_mode
+        from weizhcode.permissions.rules import TOOLS
+        mode = normalize_runtime_mode(mode)
         return [d for d in self.definitions() if
-                (d.read_only is True if mode == "plan" else d.execution_kind == "worker")]
+                (d.name in {"read_file", "find_files", "search_content", "AskUserQuestion"}
+                 if mode == "plan" else d.name in TOOLS)]
 
     def is_parallel_read(self, name):
         tool = self.get(name)

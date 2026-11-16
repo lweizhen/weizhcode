@@ -9,19 +9,24 @@ from weizhcode.redaction import Redactor
 from weizhcode.tools.base import failure
 from weizhcode.tools.limits import MAX_RESULT_CHARS, TOOL_TIMEOUT_SECONDS
 from weizhcode.tools.process import ManagedWorker
+from weizhcode.permissions.modes import normalize_runtime_mode
+from weizhcode.permissions.types import ApprovalChoice, Decision, PermissionFailure
 
 
 class ToolExecutor:
     def __init__(self, registry, context: ToolContext, redactor: Redactor | None = None, *,
-                 timeout=TOOL_TIMEOUT_SECONDS, worker_factory=ManagedWorker, questions=None):
+                 timeout=TOOL_TIMEOUT_SECONDS, worker_factory=ManagedWorker, questions=None,
+                 permissions=None, approvals=None):
         self.registry, self.context = registry, context
         self.redactor = redactor or Redactor()
         self.timeout, self.worker_factory = timeout, worker_factory
         self._active = set()
         self._closed = False
         self.questions = questions
+        self.permissions, self.approvals = permissions, approvals
 
-    async def execute(self, slot, *, mode, cancel, emit):
+    async def execute(self, slot, *, mode, cancel, emit, run_id=""):
+        mode = normalize_runtime_mode(mode)
         call = slot.call
 
         def save(result):
@@ -56,6 +61,57 @@ class ToolExecutor:
                 return save(await self.questions.ask(slot, cancel=cancel, emit=emit))
             finally:
                 slot.phase = "finished"
+        if self.permissions is None:
+            slot.phase = "finished"
+            return save(ToolResult.failure(call, "PERMISSION_UNAVAILABLE", "权限引擎未接入，未执行工具"))
+        checked = None
+        try:
+            slot.phase = "checking"
+            await emit(TurnEvent("tool_checking", local_id=slot.local_id, index=slot.index))
+            checked = await self.permissions.check(call, mode=mode, cancel=cancel)
+            if checked.decision == Decision.DENY:
+                return save(ToolResult.failure(call, checked.code or "PERMISSION_RULE_DENIED", checked.reason,
+                    permission_source=checked.source, layer=checked.matched_layer,
+                    rule=checked.matched_rule, execution_started=False))
+            if checked.decision == Decision.ASK:
+                slot.phase = "awaiting_approval"
+                choice = (await self.approvals.request(slot, checked, run_id=run_id, cancel=cancel, emit=emit)
+                          if self.approvals is not None else None)
+                if cancel.is_set():
+                    return save(cancelled_result())
+                if choice is None:
+                    return save(ToolResult.failure(call, "INTERACTION_UNAVAILABLE", "没有可用审批通道，未执行工具"))
+                if choice == ApprovalChoice.DENY:
+                    return save(ToolResult.failure(call, "USER_DENIED", "用户拒绝本次操作", permission_source="user", execution_started=False))
+                if choice == ApprovalChoice.PERMANENT:
+                    await emit(TurnEvent("notice", text="正在保存精确授权…"))
+                result = await self.permissions.accept(checked, choice, cancel=cancel)
+                if choice == ApprovalChoice.SESSION and result.warning_code:
+                    await emit(TurnEvent("notice", text="仅本次允许，未记住本会话授权"))
+                if choice == ApprovalChoice.PERMANENT:
+                    text = ("精确永久授权已保存" if result.saved else
+                            "永久授权保存结果不确定，授权可能已保存，请检查本地配置；本轮不继续执行"
+                            if result.committed is None else "仅本次允许，未保存永久授权")
+                    await emit(TurnEvent("notice", text=text))
+                    if result.committed is None:
+                        cancel.set()
+                        return save(ToolResult.failure(call, "PERMISSION_UNAVAILABLE", text))
+            await self.permissions.recheck(checked, cancel=cancel)
+            if cancel.is_set():
+                return save(cancelled_result())
+        except asyncio.CancelledError:
+            if not cancel.is_set():
+                cancel.set()
+            return save(cancelled_result())
+        except PermissionFailure as exc:
+            if exc.code == "PROCESS_CONTROL_FAILED":
+                slot.cleanup_error = str(exc)
+            return save(ToolResult.failure(call, exc.code, str(exc), execution_started=False))
+        finally:
+            if checked is not None:
+                self.permissions.forget(checked)
+            if slot.result is not None:
+                slot.phase = "finished"
         try:
             worker = self.worker_factory()
         except Exception as exc:
@@ -71,10 +127,16 @@ class ToolExecutor:
                 await emit(TurnEvent("tool_preparing", local_id=slot.local_id, index=slot.index))
                 if cancel.is_set():
                     return
-                await worker.start(self.context)
-                preview = await worker.prepare(call)
+                await worker.start(replace(self.context, permission_root=self.permissions.root))
+                if checked.target.path is not None:
+                    preview = await worker.prepare(call, permission_stamp=checked.target.path)
+                else:
+                    preview = await worker.prepare(call)
                 if preview.error:
                     save(preview.error)
+                    return
+                if checked.target.path is not None and Path(preview.target) != Path(checked.target.path.canonical_target):
+                    save(ToolResult.failure(call, "PERMISSION_TARGET_CHANGED", "准备目标与批准目标不同，未执行"))
                     return
                 if cancel.is_set():
                     return
@@ -151,5 +213,9 @@ class ToolExecutor:
         self._closed = True
         if self.questions is not None:
             self.questions.close()
+        if self.approvals is not None:
+            self.approvals.close()
+        if self.permissions is not None:
+            await self.permissions.aclose()
         await asyncio.gather(*(worker.aclose() for worker in tuple(self._active)))
 

@@ -7,7 +7,7 @@ from weizhcode.models import ToolContext
 from weizhcode.providers.sse import SSEEvent
 from weizhcode.redaction import Redactor
 from weizhcode.tools import create_default_registry
-from weizhcode.tools.executor import ToolExecutor
+from test_tool_executor import ToolExecutor
 from weizhcode.turn_runner import TurnRunner
 from test_provider_tools import make_provider, tool_events
 

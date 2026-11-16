@@ -24,7 +24,7 @@ def test_run_context_contract_isolation_and_frozen_mode():
 def test_loop_prompts_cover_plan_and_execution():
     from weizhcode.prompts import SYSTEM_PROMPT, PLAN_MODE_REMINDER, EXECUTE_DIRECTIVE
     assert "持续" in SYSTEM_PROMPT and "数据" in SYSTEM_PROMPT
-    assert "不需要逐次审批" in SYSTEM_PROMPT
+    assert "不需要逐次审批" not in SYSTEM_PROMPT and "审批" in SYSTEM_PROMPT
     assert "禁止" in PLAN_MODE_REMINDER and "/do" in PLAN_MODE_REMINDER
     assert EXECUTE_DIRECTIVE == "请按上面的计划开始执行。"
 
@@ -111,7 +111,21 @@ from weizhcode.models import ChatMessage, ProviderEvent, ToolCall, ToolContext, 
 from weizhcode.prompts import SYSTEM_PROMPT
 from weizhcode.redaction import Redactor
 from weizhcode.tools import create_default_registry
-from weizhcode.tools.executor import ToolExecutor
+from weizhcode.tools.executor import ToolExecutor as _ToolExecutor
+
+def ToolExecutor(registry, context, *args, **kwargs):
+    # Explicit sample permissions for pre-permission business/lifecycle tests.
+    from dataclasses import replace
+    from test_permission_engine import MemoryIO
+    from weizhcode.permissions.engine import PermissionEngine
+    from weizhcode.permissions.rules import parse_rule
+    from weizhcode.permissions.types import RuleSet
+    if "permissions" not in kwargs:
+        engine = PermissionEngine.load(context.project_root, user_home=context.project_root / ".test-home", io=MemoryIO())
+        engine.settings["local"] = replace(engine.settings["local"],
+            rules=RuleSet(allow=tuple(parse_rule(name) for name in ("Write", "Edit", "Bash"))))
+        kwargs["permissions"] = engine
+    return _ToolExecutor(registry, context, *args, **kwargs)
 from weizhcode.turn_runner import TurnRunner
 
 
@@ -135,7 +149,7 @@ class FakeExecutor:
         self.closed = False
         self.status = status
 
-    async def execute(self, slot, *, mode, cancel, emit):
+    async def execute(self, slot, *, mode, cancel, emit, run_id=""):
         call = slot.call
         self.calls.append(call)
         slot.execution_started = True
@@ -160,7 +174,7 @@ def runner(replies, executor=None):
 class LoopExecutor:
     def __init__(self):
         self.calls, self.closed = [], False
-    async def execute(self, slot, *, mode, cancel, emit):
+    async def execute(self, slot, *, mode, cancel, emit, run_id=""):
         self.calls.append(slot.call)
         slot.execution_started = True
         slot.result = ToolResult(slot.call.call_id, slot.call.name, "actual result")
@@ -199,14 +213,14 @@ async def test_environment_once_per_task_and_reminder_schedule(tmp_path):
         contexts = [kwargs["prompt_context"] for _, kwargs in r.provider.requests]
         assert all(kwargs["system_prompt"] == "" for _, kwargs in r.provider.requests)
         for index, ctx in enumerate(contexts, 1):
-            assert ctx.supplements[0].text == (FULL_PLAN_REMINDER if index in {1, 5, 9} else BRIEF_PLAN_REMINDER)
+            assert ctx.supplements[-1].text == (FULL_PLAN_REMINDER if index in {1, 5, 9} else BRIEF_PLAN_REMINDER)
             assert ctx.stable_text == SYSTEM_PROMPT and ctx.environment_text == contexts[0].environment_text
         assert not any("<system-reminder>" in msg.content for msg in r.conversation.messages())
         _ = [e async for e in r.run("new plan")]
-        assert len(capture.calls) == 2 and r.provider.requests[-1][1]["prompt_context"].supplements[0].text == FULL_PLAN_REMINDER
+        assert len(capture.calls) == 2 and r.provider.requests[-1][1]["prompt_context"].supplements[-1].text == FULL_PLAN_REMINDER
         r.set_mode("normal")
         _ = [e async for e in r.run("execute")]
-        assert len(capture.calls) == 3 and not r.provider.requests[-1][1]["prompt_context"].supplements
+        assert len(capture.calls) == 3 and [s.kind for s in r.provider.requests[-1][1]["prompt_context"].supplements] == ["permission"]
     finally:
         await r.aclose()
 
@@ -271,7 +285,7 @@ async def test_loop_single_flight_natural_and_empty_response():
 
 async def test_loop_multistep_history_actual_files(tmp_path):
     from weizhcode.models import ToolContext
-    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import ToolExecutor
     (tmp_path / "source").write_text("hello", encoding="utf-8")
     r = loop_runner([
         reply("read", (ToolCall("1", "read_file", '{"path":"source"}'),)),
@@ -343,7 +357,7 @@ async def test_unknown_round_threshold_known_invalid_and_mixed_reset():
 
 async def test_loop_error_recovery_preserves_write_no_replay(tmp_path):
     from weizhcode.models import ToolContext
-    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import ToolExecutor
     r = loop_runner([reply("", (ToolCall("a", "write_file", '{"path":"a","content":"written"}'),)),
                      [ProviderEvent("error", message="secret-token failed")], reply("next")],
                     ToolExecutor(create_default_registry(), ToolContext(tmp_path)))
@@ -367,7 +381,7 @@ async def test_loop_error_recovery_partial_call_never_executes():
 
 async def test_loop_error_recovery_tool_failure_then_adjust(tmp_path):
     from weizhcode.models import ToolContext
-    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import ToolExecutor
     r = loop_runner([reply("", (ToolCall("a", "read_file", '{"path":"missing"}'),)),
                      reply("", (ToolCall("b", "write_file", '{"path":"a","content":"fixed"}'),)), reply("fixed")],
                     ToolExecutor(create_default_registry(), ToolContext(tmp_path)))
@@ -391,7 +405,7 @@ async def test_session_usage_settlement_once_across_user_turns():
 
 async def test_loop_mode_control_frozen_tools_plan_and_do(tmp_path):
     from weizhcode.models import ToolContext
-    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import ToolExecutor
     from weizhcode.prompts import EXECUTE_DIRECTIVE
     r = loop_runner([reply("", (ToolCall("a", "write_file", '{"path":"a","content":"x"}'),)),
                      reply("plan"), reply("", (ToolCall("b", "write_file", '{"path":"a","content":"x"}'),)), reply("done")],
@@ -405,7 +419,7 @@ async def test_loop_mode_control_frozen_tools_plan_and_do(tmp_path):
     assert all(len(kw["tools"]) == 4 for _, kw in r.provider.requests)
     events = [e async for e in r.run(EXECUTE_DIRECTIVE, mode="normal")]
     assert events[-1].reason == "completed" and (tmp_path / "a").read_text() == "x"
-    assert all(len(kw["tools"]) == 6 for _, kw in r.provider.requests[2:]) and r.mode == "normal"
+    assert all(len(kw["tools"]) == 6 for _, kw in r.provider.requests[2:]) and r.mode == "default"
 
 
 async def test_loop_lifecycle_reuse_cancel_and_permanent_close():
@@ -500,7 +514,7 @@ async def test_loop_lifecycle_reuse_app_close_unconsumed_full_channel():
 
 async def test_loop_budget_context_large_result_and_no_history_trim(tmp_path):
     from weizhcode.models import ToolContext
-    from weizhcode.tools.executor import ToolExecutor
+    from test_tool_executor import ToolExecutor
     (tmp_path / "large").write_text(("fake-secret-token" + "x" * 2000 + "\n") * 300, encoding="utf-8")
     r = loop_runner([reply("", (ToolCall("a", "read_file", '{"path":"large"}'),)),
                      [ProviderEvent("error", message="context length exceeded")], reply("recovered")],

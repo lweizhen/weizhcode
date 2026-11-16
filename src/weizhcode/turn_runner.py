@@ -7,6 +7,8 @@ import json
 from weizhcode.models import (ChatMessage, ToolResult, TurnEvent, RunContext, StreamState, ToolSlot,
                               UsageTotals, MAX_ITERATIONS, MAX_UNKNOWN_RUN)
 from weizhcode.redaction import Redactor
+from weizhcode.permissions.modes import normalize_runtime_mode
+from weizhcode.permissions.types import PermissionMode
 
 
 class _EventChannel:
@@ -53,6 +55,12 @@ class _EventChannel:
                        question=replace(event.question, question=self.redactor.display(event.question.question),
                                         options=tuple(self.redactor.display(s) for s in event.question.options))
                        if event.question else None,
+                       approval=replace(event.approval, arguments_preview=self.redactor.display(event.approval.arguments_preview),
+                           target_preview=self.redactor.display(event.approval.target_preview),
+                           reason=self.redactor.display(event.approval.reason),
+                           scope_hint=self.redactor.display(event.approval.scope_hint),
+                           tool_name=self.redactor.display(event.approval.tool_name),
+                           friendly_name=self.redactor.display(event.approval.friendly_name)) if event.approval else None,
                        usage=replace(event.usage, source=self.redactor.display(event.usage.source))
                        if event.usage else None)
 
@@ -129,7 +137,7 @@ class TurnRunner:
     def __init__(self, provider, conversation, registry, executor, redactor=None, *,
                  collector=None, scheduler=None, max_iterations=MAX_ITERATIONS,
                  max_unknown_run=MAX_UNKNOWN_RUN, system_prompt=None, questions=None,
-                 environment_collector=None):
+                 environment_collector=None, approvals=None):
         from weizhcode.prompts import SYSTEM_PROMPT
         from weizhcode.stream_collector import StreamCollector
         from weizhcode.tool_scheduler import ToolScheduler
@@ -146,11 +154,18 @@ class TurnRunner:
             raise ValueError("交互通道注入不一致")
         self.questions = questions or existing or QuestionBroker()
         executor.questions = self.questions
+        from weizhcode.approvals import ApprovalBroker
+        existing_approvals = getattr(executor, "approvals", None)
+        if approvals is not None and existing_approvals is not None and approvals is not existing_approvals:
+            raise ValueError("审批通道注入不一致")
+        self.approvals = approvals or existing_approvals or ApprovalBroker(self.redactor)
+        executor.approvals = self.approvals
         self.max_iterations, self.max_unknown_run = max_iterations, max_unknown_run
         self.system_prompt = SYSTEM_PROMPT if system_prompt is None else system_prompt
         from weizhcode.prompting.environment import EnvironmentCollector
         self.environment_collector = environment_collector or EnvironmentCollector()
-        self.mode = "normal"
+        permissions = getattr(executor, "permissions", None)
+        self.mode = permissions.start_mode if permissions is not None else PermissionMode.DEFAULT
         self.usage_totals = UsageTotals()
         self._settled = set()
         self.busy, self._closed = False, False
@@ -159,10 +174,9 @@ class TurnRunner:
     def set_mode(self, mode):
         if self.busy or self._closed:
             return TurnEvent("notice", reason="busy", text="当前任务尚未结束或应用已退出，模式未改变", mode=self.mode)
-        if mode not in {"normal", "plan"}:
-            raise ValueError("未知模式")
+        mode = normalize_runtime_mode(mode)
         self.mode = mode
-        return TurnEvent("mode_changed", mode=mode, text="计划模式（只读）" if mode == "plan" else "普通执行模式")
+        return TurnEvent("mode_changed", mode=mode, text="计划模式（只读）" if mode == "plan" else "权限模式：" + mode.value)
 
     def run(self, user_text, *, mode=None):
         if self.busy or self._closed:
@@ -187,6 +201,17 @@ class TurnRunner:
     def bind_questions(self):
         return self.questions.connect()
 
+    def bind_approvals(self):
+        return self.approvals.connect()
+
+    def unbind_approvals(self, token):
+        self.approvals.disconnect(token)
+
+    def submit_approval(self, run_id, approval_id, choice):
+        if self._context is None or self._context.run_id != run_id or self._context.cancel_event.is_set():
+            return False, "审批不属于当前任务或任务已取消"
+        return self.approvals.submit(run_id, approval_id, choice)
+
     def unbind_questions(self, token):
         self.questions.disconnect(token)
 
@@ -202,6 +227,7 @@ class TurnRunner:
                 if self._context is not None:
                     self._context.cancel_event.set()
                     self._context.consumer_closed.set()
+                self.approvals.close()
                 if self._task is not None:
                     await asyncio.gather(self._task, return_exceptions=True)
                 self.questions.close()

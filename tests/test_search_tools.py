@@ -41,7 +41,7 @@ def tree(tmp_path):
 
 
 def test_search_walk_hidden_and_invalid_root(tree):
-    names = {p.relative_to(tree).as_posix() for p in SearchWalk(tree).files()}
+    names = {p.relative_to(tree).as_posix() for p in SearchWalk(tree, project_root=tree).files()}
     assert ".hidden.py" not in names
     assert "root.py" in names and "sub/a.py" in names
     assert "ignored/a.py" not in names
@@ -50,17 +50,17 @@ def test_search_walk_hidden_and_invalid_root(tree):
 
 
 def test_gitignore_scope_nested_and_ancestor(tree):
-    names = {p.relative_to(tree).as_posix() for p in SearchWalk(tree).files()}
+    names = {p.relative_to(tree).as_posix() for p in SearchWalk(tree, project_root=tree).files()}
     assert "keep.log" in names and "drop.log" not in names
     assert "sub/local.log" in names and "sub/drop.log" not in names
     assert "sub/drop.txt" not in names
-    names = {p.name for p in SearchWalk(tree / "sub").files()}
+    names = {p.name for p in SearchWalk(tree / "sub", project_root=tree).files()}
     assert "local.log" in names and "drop.log" not in names and "drop.txt" not in names
 
 
 @pytest.mark.parametrize("hidden,ignored", [(False, False), (True, False), (False, True), (True, True)])
 def test_gitignore_scope_flags_are_independent(tree, hidden, ignored):
-    names = {p.relative_to(tree).as_posix() for p in SearchWalk(tree, include_hidden=hidden, include_ignored=ignored).files()}
+    names = {p.relative_to(tree).as_posix() for p in SearchWalk(tree, project_root=tree, include_hidden=hidden, include_ignored=ignored).files()}
     assert (".hidden.py" in names) is hidden
     assert ("ignored/a.py" in names) is ignored
     assert ("drop.log" in names) is ignored
@@ -71,7 +71,7 @@ def test_search_walk_symbolic_link_does_not_recurse(tree):
         (tree / "sub/loop").symlink_to(tree, target_is_directory=True)
     except OSError:
         pytest.skip("当前环境没有创建目录链接的权限")
-    names = list(SearchWalk(tree).files())
+    names = list(SearchWalk(tree, project_root=tree).files())
     assert len(names) < 20
     assert not any("loop" in p.parts for p in names)
 
@@ -123,6 +123,26 @@ def test_search_literal_not_regex_and_case(tree):
     assert ":1:Foo.bar" in result.content
     assert run(SearchContentTool(), tree, pattern="foo.bar").metadata["count"] == 0
     assert run(SearchContentTool(), tree, pattern="foo(bar)").metadata["count"] == 1
+
+
+def test_search_candidate_guard_no_external_text(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("external-secret", encoding="utf-8")
+    monkeypatch.setattr(SearchWalk, "files", lambda self: iter([outside]))
+    result = run(SearchContentTool(), root, pattern="secret")
+    assert result.is_error and "external-secret" not in result.content
+    assert result.metadata["sandbox_skipped"] == 1
+
+
+def test_search_root_guard_external_ignore(tmp_path):
+    (tmp_path / ".gitignore").write_text("*.py\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.py").write_text("hello")
+    result = run(FindFilesTool(), root, pattern="**/*.py")
+    assert "a.py" in result.content
 
 
 def test_search_literal_ignored_range(tree):

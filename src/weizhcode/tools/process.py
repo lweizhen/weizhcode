@@ -136,7 +136,8 @@ class ManagedWorker:
         if self.purpose == "permission":
             self.permission_temp = context.project_root / ".weizhcode" / f".settings.local.{self.request_id}.tmp"
         await self._send({"type": "start", "project_root": str(context.project_root),
-                          "purpose": self.purpose, "request_id": self.request_id})
+                          "purpose": self.purpose, "request_id": self.request_id,
+                          "permission_root": asdict(context.permission_root) if context.permission_root else None})
         await self._receive("ready")
 
     async def _drain_stderr(self):
@@ -182,8 +183,9 @@ class ManagedWorker:
             return message
         raise ToolFailure("INTERNAL_ERROR", "工具工作进程异常终止")
 
-    async def prepare(self, call: ToolCall) -> PreparedOperationPreview:
-        await self._send({"type": "prepare", "call": asdict(call)})
+    async def prepare(self, call: ToolCall, *, permission_stamp=None) -> PreparedOperationPreview:
+        await self._send({"type": "prepare", "call": asdict(call),
+                          "permission_stamp": asdict(permission_stamp) if permission_stamp else None})
         message = await self._receive("prepared")
         payload = message["preview"]
         if payload.get("error"):

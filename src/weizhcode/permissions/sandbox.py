@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path, PureWindowsPath
 import stat
+import re
 
 from .types import PathStamp, PermissionFailure, RootIdentity
 
@@ -57,10 +58,19 @@ def _validate_form(value):
 
 def resolve_target(raw: str, root: RootIdentity) -> PathStamp:
     verify_root(root)
+    original = raw
+    if os.name == "nt" and isinstance(raw, str) and raw.startswith("\\\\?\\"):
+        suffix = raw[4:]
+        if re.match(r"^[A-Za-z]:[\\/]", suffix):
+            raw = suffix
+        elif suffix.startswith("UNC\\"):
+            raw = "\\\\" + suffix[4:]
     _validate_form(raw)
     try:
         requested = Path(raw).expanduser()
         requested = requested if requested.is_absolute() else Path(root.canonical_root) / requested
+        if os.name == "nt" and os.path.normcase(requested.drive) != os.path.normcase(Path(root.canonical_root).drive):
+            raise PermissionFailure("PATH_OUTSIDE_PROJECT", "路径在项目目录之外，工具未执行")
         current = Path(requested.anchor)
         # Resolve existing components before interpreting the next '..'.
         for part in requested.parts[1:]:
@@ -99,7 +109,7 @@ def resolve_target(raw: str, root: RootIdentity) -> PathStamp:
                 exists = False
                 ancestor = ancestor.parent
         relative = os.path.relpath(current, root.canonical_root).replace(os.sep, "/")
-        return PathStamp(raw, str(current), relative, exists, str(ancestor), _identity(ancestor))
+        return PathStamp(original, str(current), relative, exists, str(ancestor), _identity(ancestor))
     except PermissionFailure:
         raise
     except (OSError, RuntimeError, ValueError):
