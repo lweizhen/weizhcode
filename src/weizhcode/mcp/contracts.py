@@ -109,6 +109,18 @@ class McpStatusSnapshot:
 
 
 @dataclass(frozen=True)
+class McpDiscovery:
+    definitions: tuple = ()
+    identities: tuple[McpToolIdentity, ...] = ()
+    status: McpStatusSnapshot = field(default_factory=McpStatusSnapshot)
+
+    def __post_init__(self):
+        from copy import deepcopy
+        object.__setattr__(self, "definitions", tuple(deepcopy(self.definitions)))
+        object.__setattr__(self, "identities", tuple(self.identities))
+
+
+@dataclass(frozen=True)
 class TrustRequest:
     startup_id: str
     approval_id: str

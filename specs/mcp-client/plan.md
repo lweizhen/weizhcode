@@ -1,6 +1,6 @@
 # weizhCode MCP 客户端 Plan
 
-> 状态：四份文档均已明确批准，已进入实现。本文仍为设计，不是完成或验收证明；证据见Task/Checklist。
+> 状态：四份文档均已批准；本设计已接入生产启动与工具流程。离线完整回归723 passed、4 skipped；本文仍非全部验收证明，证据及待验边界见Task/Checklist。
 > 日期：2026-11-17。只更新本阶段文档，不安装依赖、不启动 Server、不连接生产服务。
 > 基线：Python 3.11+、HTTPX、Textual、PyYAML、jsonschema，以及当前工具进程、权限 Engine、ApprovalBroker、ToolScheduler、TurnRunner。
 

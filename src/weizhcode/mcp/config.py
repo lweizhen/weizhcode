@@ -5,7 +5,7 @@ import json
 import os
 import re
 import shutil
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qsl
 
 from weizhcode.yaml_utils import SafeYamlError, load_mapping
 from .contracts import McpConfigSnapshot, McpServerConfig, McpWarning, valid_server_name
@@ -117,6 +117,11 @@ def parse_config_layers(user: bytes | None, project: bytes | None, *, environ=No
     for name, (source, raw) in sorted(merged.items()):
         # Collect known credentials even from invalid definitions; never echo their raw values.
         if type(raw) is dict:
+            if isinstance(raw.get("url"), str):
+                try:
+                    secrets.update(value for _, value in parse_qsl(urlsplit(raw["url"]).query) if value)
+                except ValueError:
+                    pass
             for field in ("env", "headers"):
                 if type(raw.get(field)) is dict:
                     for value in raw[field].values():

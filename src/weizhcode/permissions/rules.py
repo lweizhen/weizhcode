@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from .types import Category, Decision, PermissionFailure, PermissionTarget, Rule, RuleSet
 
@@ -21,6 +22,15 @@ def parse_rule(value: str) -> Rule:
     if not isinstance(value, str) or not value.strip() or len(value) > 8192:
         invalid()
     text = value.strip()
+    if text.startswith("mcp__"):
+        from weizhcode.mcp.contracts import valid_server_name
+        parts = text.split("__")
+        if (len(parts) != 3 or not valid_server_name(parts[1]) or
+                (parts[2] != "*" and not re.fullmatch(r"[A-Za-z0-9_-]+", parts[2]))
+                or (parts[2] != "*" and len(text) > 64)):
+            invalid()
+        return Rule(text, is_exact=parts[2] != "*", original=text, all_targets=True,
+                    kind="mcp_server" if parts[2] == "*" else "mcp_exact")
     if text in FRIENDLY:
         return Rule(text, original=text, all_targets=True)
     start = text.find("(")
@@ -80,6 +90,10 @@ def _match(tokens, text):
 
 
 def matches(rule: Rule, friendly: str, target: str) -> bool:
+    if rule.kind == "mcp_exact":
+        return rule.friendly_name == friendly == target
+    if rule.kind == "mcp_server":
+        return friendly == target and friendly.startswith(rule.friendly_name[:-1])
     if rule.friendly_name != friendly:
         return False
     if rule.all_targets:
@@ -113,6 +127,8 @@ def match_rules(rules: RuleSet, friendly: str, target: str):
 
 
 def exact_rule(target: PermissionTarget) -> Rule:
+    if target.external_identity is not None:
+        return parse_rule(target.external_identity.full_name)
     value = target.match_target
     escaped = "".join("\\" + c if c in "\\*()" else c for c in value)
     rule = parse_rule(f"{target.friendly_name}({escaped})")
@@ -122,6 +138,8 @@ def exact_rule(target: PermissionTarget) -> Rule:
 
 
 def rule_key(rule: Rule):
+    if rule.kind != "builtin":
+        return rule.kind, rule.friendly_name
     tokens = rule.tokens
     if rule.friendly_name != "Bash":
         tokens = tuple((k, os.path.normcase(v)) for k, v in tokens)

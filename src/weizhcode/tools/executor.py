@@ -113,6 +113,23 @@ class ToolExecutor:
             if slot.result is not None:
                 slot.phase = "finished"
         try:
+            if self.registry.get(call.name).definition.execution_kind == "external":
+                slot.phase = "preparing"
+                await emit(TurnEvent("tool_preparing", local_id=slot.local_id, index=slot.index))
+                tool = self.registry.get(call.name)
+                operation = tool.prepare(call, self.context)
+                if operation.error:
+                    return save(operation.error)
+                if cancel.is_set():
+                    return save(cancelled_result())
+                slot.phase = "running"
+                await emit(TurnEvent("tool_running", local_id=slot.local_id, index=slot.index))
+                def started():
+                    slot.execution_started = True
+                try:
+                    return save(await tool.execute_external(operation, cancel=cancel, execution_started=started))
+                finally:
+                    slot.phase = "finished"
             worker = self.worker_factory()
         except Exception as exc:
             slot.cleanup_error = "INTERNAL_ERROR：工具执行器初始化失败，任务已停止"
@@ -218,4 +235,12 @@ class ToolExecutor:
         if self.permissions is not None:
             await self.permissions.aclose()
         await asyncio.gather(*(worker.aclose() for worker in tuple(self._active)))
+        manager = getattr(self, "mcp_manager", None)
+        if manager is not None:
+            report = await manager.aclose()
+            self.mcp_shutdown_report = report
+            if not report.clean:
+                notices = getattr(self, "mcp_notices", None)
+                if notices is not None:
+                    notices.append("MCP进程清理无法确认：" + ", ".join(report.unconfirmed_servers))
 

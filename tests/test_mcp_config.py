@@ -107,3 +107,18 @@ def test_fields_windows_scripts(monkeypatch):
     monkeypatch.setattr(module.shutil, "which", lambda *a, **kw: "C:/tools/program.cmd")
     if module.os.name == "nt":
         assert not parse_config_layers(raw({"demo": stdio(command="program")}), None, environ={}).servers
+
+
+def test_mcp_budget_expanded_configuration():
+    values = {f"V{i}": "${BIG}" for i in range(128)}
+    result = parse_config_layers(raw({"a": stdio(env=values), "b": stdio(env=values)}), None, environ={"BIG": "x" * 8192})
+    assert len(result.servers) <= 1
+    assert result.warnings and all(w.code == "MCP_CONFIG_LIMIT" for w in result.warnings)
+
+
+def test_mcp_example_parses_synthetic_environment():
+    from pathlib import Path
+    example = Path(__file__).parents[1] / "docs/mcp/mcp-servers.example.yaml"
+    result = parse_config_layers(None, example.read_bytes(), environ={"CONTEXT7_API_KEY": "synthetic-c7", "DEMO_TOKEN": "synthetic-demo"})
+    assert not result.warnings and len(result.servers) == 2
+    assert result.servers[0].headers == {"authorization": "Bearer synthetic-c7"}

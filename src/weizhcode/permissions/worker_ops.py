@@ -17,6 +17,13 @@ def handle(message, context, *, resource_created=None):
         # Only the application can request this operation, never a model tool name.
         target = PermissionTarget(data["internal_name"], data["friendly_name"], Category(data["category"]),
                                   data["match_target"], data.get("command"))
+        if data.get("external_identity") is not None:
+            from dataclasses import replace
+            from weizhcode.mcp.contracts import McpToolIdentity
+            identity = McpToolIdentity(**data["external_identity"])
+            if identity.full_name != target.internal_name or target.match_target != identity.full_name:
+                raise ValueError()
+            target = replace(target, external_identity=identity)
         destination = context.project_root / ".weizhcode/settings.local.yaml"
         stamp = resolve_target(str(destination), root)
         if Path(stamp.canonical_target) != destination:

@@ -310,7 +310,7 @@ class WeizhCodeApp(App[None]):
                 yield Static(f"weizhCode v{self.ui.version}", id="app-title")
                 yield Static(self.redactor.display(self.ui.model), id="header-model", markup=False)
                 yield Static(self.redactor.display(self.ui.project_path), id="header-path", markup=False)
-        yield Static(f"Connected to 0 MCP server(s), {len(self.runner.registry.definitions())} tools registered", id="status", markup=False)
+        yield Static(self._mcp_status_text(len(self.runner.registry.definitions())), id="status", markup=False)
         yield VerticalScroll(id="messages")
         yield ChatInput(id="input")
         with Horizontal(id="footer"):
@@ -320,8 +320,21 @@ class WeizhCodeApp(App[None]):
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         await self.submit_text(event.value)
 
+    def _mcp_status_text(self, visible):
+        manager = getattr(getattr(self.runner, "executor", None), "mcp_manager", None)
+        states = manager.snapshot().servers if manager else ()
+        ready = sum(s.state == "ready" for s in states)
+        failed = sum(s.state == "unavailable" for s in states)
+        total = len(self.runner.registry.definitions())
+        if manager:
+            visible = len(self.runner.registry.definitions_for_mode(self.runner.mode))
+        suffix = f", {failed} unavailable" if failed else ""
+        return f"Connected to {ready} MCP server(s), {total} tools registered{suffix}" + (f", {visible} visible" if visible != total else "")
+
     async def on_mount(self):
         self.query_one(ChatInput).focus()
+        self._mcp_notice_index = 0
+        await self._update_mcp_notices()
         if hasattr(self.runner, "bind_questions"):
             self._question_connection = self.runner.bind_questions()
         if hasattr(self.runner, "bind_approvals"):
@@ -334,7 +347,15 @@ class WeizhCodeApp(App[None]):
             if engine.root is None:
                 await self._append_message("notice", "项目根不可用，工具将拒绝执行；仍可纯聊天。")
         self.set_interval(.1, self._update_status)
+        self.set_interval(.1, self._update_mcp_notices)
         self._update_status()
+
+    async def _update_mcp_notices(self):
+        notices = getattr(getattr(self.runner, "executor", None), "mcp_notices", ())
+        while self._mcp_notice_index < len(notices):
+            notice = notices[self._mcp_notice_index]
+            self._mcp_notice_index += 1
+            await self._append_message("notice", self.redactor.display(notice))
 
     def _update_status(self):
         if not self.is_mounted:
@@ -373,7 +394,7 @@ class WeizhCodeApp(App[None]):
         count = len(self.runner.registry.definitions())
         try:
             self.query_one("#status", Static).update(
-                f"Connected to 0 MCP server(s), {count} tools registered\n{mode} · {progress} · {usage}")
+                f"{self._mcp_status_text(count)}\n{mode} · {progress} · {usage}")
         except NoMatches:
             pass
 

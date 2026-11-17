@@ -29,6 +29,7 @@ class WindowsJob:
             "SetInformationJobObject": ([handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
             "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], handle),
             "AssignProcessToJobObject": ([handle, handle], wintypes.BOOL),
+            "QueryInformationJobObject": ([handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p], wintypes.BOOL),
             "TerminateJobObject": ([handle, wintypes.UINT], wintypes.BOOL),
             "CloseHandle": ([handle], wintypes.BOOL),
         }
@@ -80,6 +81,15 @@ class WindowsJob:
             finally:
                 if not self.api.CloseHandle(handle):
                     raise ctypes.WinError(ctypes.get_last_error() or 1)
+
+    def active_processes(self):
+        class Accounting(ctypes.Structure):
+            _fields_ = [("times", ctypes.c_longlong * 4), ("faults", ctypes.c_uint32),
+                        ("total", ctypes.c_uint32), ("active", ctypes.c_uint32), ("terminated", ctypes.c_uint32)]
+        info = Accounting()
+        if not self.api.QueryInformationJobObject(self.handle, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return info.active
 
 
 class ManagedWorker:

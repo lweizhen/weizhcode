@@ -26,6 +26,7 @@ class PermissionEngine:
         self.start_mode = next((settings[layer].default_mode for layer in ("local", "project", "user")
                                 if settings[layer].default_mode is not None), PermissionMode.DEFAULT)
         self._asks = {}
+        self.external_identity = lambda name: None
 
     @classmethod
     def load(cls, project_root, *, user_home=None, io=None):
@@ -44,6 +45,9 @@ class PermissionEngine:
     async def check(self, call, *, mode, cancel):
         mode = normalize_runtime_mode(mode)
         identity = TOOLS.get(call.name)
+        external = self.external_identity(call.name)
+        if external is not None:
+            identity = (external.full_name, Category.EXEC)
         args = parse_tool_arguments(call.raw_arguments)
         if identity is None or args is None:
             return self._deny("PERMISSION_UNAVAILABLE", "不能确认工具身份或参数，安全拒绝")
@@ -54,7 +58,11 @@ class PermissionEngine:
             return self._deny("PERMISSION_ROOT_UNAVAILABLE", "项目根不可用，工具未执行", "sandbox")
         if cancel.is_set():
             raise asyncio.CancelledError()
-        if category == Category.EXEC:
+        if external is not None:
+            from .sandbox import verify_root
+            verify_root(self.root)
+            target = PermissionTarget(call.name, friendly, Category.EXEC, friendly, external_identity=external)
+        elif category == Category.EXEC:
             command = args.get("command")
             if not isinstance(command, str) or not command.strip() or "\0" in command:
                 return self._deny("PERMISSION_UNAVAILABLE", "命令参数无效")
@@ -93,6 +101,11 @@ class PermissionEngine:
         target = checked.target
         if target is None:
             raise PermissionFailure("PERMISSION_UNAVAILABLE", "授权目标无效")
+        if target.external_identity is not None:
+            from .sandbox import verify_root
+            verify_root(self.root)
+            if self.external_identity(target.internal_name) != target.external_identity:
+                raise PermissionFailure("PERMISSION_TARGET_CHANGED", "MCP工具身份已改变")
         if target.path is not None:
             current = await self.io.inspect_path(target.path.original, self.root, cancel=cancel)
             if Path(current.canonical_target) != Path(target.path.canonical_target):

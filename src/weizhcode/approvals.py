@@ -60,6 +60,8 @@ class ApprovalBroker:
         args = json.dumps(slot.call.arguments or {}, ensure_ascii=False)
         scope = ("精确命令授权不绑定 cwd；本会话/永久许可会复用于同一完整命令。" if target.command is not None
                  else "此工具＋真实路径授权不绑定本次内容；搜索授权针对搜索根。")
+        if target.external_identity is not None:
+            scope = "MCP整工具身份许可，不绑定本次参数；后续不同参数可能复用。外部Server不受内置文件范围限制。"
         request = ApprovalRequest(uuid4().hex, slot.call.name, target.friendly_name, safe(args, 4096),
                                   safe(target.match_target, 2048), safe(checked.reason, 1024), scope)
         pending = _Pending(run_id, request, asyncio.get_running_loop().create_future(), cancel)

@@ -1,0 +1,15 @@
+# Copy only after reviewing the executable/endpoint into .weizhcode/mcp.yaml.
+# User-level configuration: ~/.weizhcode/mcp.yaml.
+# Project definitions replace user definitions with the same name entirely.
+mcp_servers:
+  context7:
+    type: http
+    url: https://mcp.context7.com/mcp
+    headers:
+      Authorization: "Bearer ${CONTEXT7_API_KEY}"
+  local_demo:
+    type: stdio
+    command: python
+    args: ["-m", "example_mcp_server"]
+    env:
+      DEMO_TOKEN: "${DEMO_TOKEN}"

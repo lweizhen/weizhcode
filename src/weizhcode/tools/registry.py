@@ -20,8 +20,15 @@ def _has_reference(value) -> bool:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._external = {}
 
     def register(self, tool: Tool) -> None:
+        definition = tool.definition
+        if definition.execution_kind == "external":
+            raise ValueError("外部工具必须通过可信来源注册")
+        self._register(tool)
+
+    def _register(self, tool):
         definition = tool.definition
         if definition.name in self._tools:
             raise ValueError(f"工具名称重复：{definition.name}")
@@ -29,6 +36,19 @@ class ToolRegistry:
             raise ValueError("工具 Schema 必须自包含，不允许引用")
         Draft202012Validator.check_schema(definition.parameters)
         self._tools[definition.name] = tool
+
+    def register_external(self, tool, identity):
+        from weizhcode.mcp.tool import McpToolAdapter
+        if (not isinstance(tool, McpToolAdapter) or tool.identity != identity
+                or tool.manager.identity(identity.full_name) != identity
+                or tool not in tool.manager.tools):
+            raise ValueError("外部工具来源无效")
+        self._register(tool)
+        self._external[identity.full_name] = (tool, identity)
+
+    def external_identity(self, name):
+        item = self._external.get(name)
+        return item[1] if item and self.get(name) is item[0] and item[0].manager.identity(name) == item[1] else None
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -47,7 +67,7 @@ class ToolRegistry:
         mode = normalize_runtime_mode(mode)
         return [d for d in self.definitions() if
                 (d.name in {"read_file", "find_files", "search_content", "AskUserQuestion"}
-                 if mode == "plan" else d.name in TOOLS)]
+                 if mode == "plan" else d.name in TOOLS or self.external_identity(d.name) is not None)]
 
     def is_parallel_read(self, name):
         tool = self.get(name)
@@ -61,6 +81,8 @@ class ToolRegistry:
         tool = self.get(call.name)
         if tool is None:
             return ToolResult.failure(call, "UNKNOWN_TOOL", f"未知工具：{call.name}")
+        if tool.definition.execution_kind == "external" and len(call.raw_arguments.encode()) > 65536:
+            return ToolResult.failure(call, "INVALID_ARGUMENTS", "MCP参数超过64KiB")
         try:
             arguments = json.loads(call.raw_arguments, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         except (ValueError, TypeError, RecursionError):

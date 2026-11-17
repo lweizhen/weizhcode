@@ -77,4 +77,33 @@ uv run python -m compileall -q src
 uv run pytest -v
 ```
 
-不需要新增SDK、Ruff/mypy或评测依赖。Windows原生异步子进程检查需要能创建本机事件循环/进程的执行环境；平台不足与缺凭证检查分别记录。真实PowerShell界面、真实缓存命中和离线测试是不同证据。
+MCP使用锁定的官方SDK（随 `uv sync` 安装），不需要额外安装Ruff/mypy或评测依赖。Windows原生异步子进程检查需要能创建本机事件循环/进程的执行环境；平台不足与缺凭证检查分别记录。真实PowerShell界面、真实缓存命中和离线测试是不同证据。
+
+## MCP外部工具
+
+MCP配置与模型供应商配置分开。项目级放在 `.weizhcode/mcp.yaml`，用户级放在 `~/.weizhcode/mcp.yaml`；顶层是map，不是带 `- name` 的列表。项目同名Server完整覆盖用户定义，不拼接字段；修改配置后需重启。示例见 [mcp-servers.example.yaml](docs/mcp/mcp-servers.example.yaml)。
+
+Context7远程地址与认证形式已按[官方客户端配置说明](https://github.com/upstash/context7/blob/master/docs/resources/all-clients.mdx)核对；本工程未自动连接该生产服务。
+
+```yaml
+mcp_servers:
+  context7:
+    type: http
+    url: https://mcp.context7.com/mcp
+    headers:
+      Authorization: "Bearer ${CONTEXT7_API_KEY}"
+```
+
+在启动weizhCode的同一个PowerShell中设置 `$env:CONTEXT7_API_KEY = "你的Context7密钥"`，再运行 `uv run weizhcode`。变量缺失时只跳过对应Server并提示变量名，不带空凭据连接。只有env/headers的值支持变量展开；command、args、url、名称不展开。不要把密钥直接写进YAML或截图。
+
+项目级Server首次连接前会要求确认启动信任，默认跳过；用户级配置视为主动信任。确认后仅记住当前真实项目与相同有效配置；命令、参数、端点或显式认证值变化后重新确认。记录为 `.weizhcode/mcp-trust.local.json`，由用户目录私有key认证，避免仓库伪造信任；不要提交记录、key及临时文件。Git项目未忽略或已跟踪这些数据时，只允许本次启动并提示未记住，不擅自改其他项目Git设置。
+
+启动信任不等于工具许可。DEFAULT/ACCEPT EDITS下MCP默认需要四选审批，readOnlyHint不会自动放行；PLAN既不提供也不执行MCP工具。BYPASS仍尊重命中deny和启动信任。规则可写 `mcp__context7__query-docs` 或 `mcp__context7__*`，沿用会话、本地、项目、用户层序及同层deny优先。自动会话/永久允许只保存精确工具身份，但不绑定本次参数，后续不同参数也可能复用许可。
+
+stdio需要显式 `type: stdio`、已安装的真实可执行程序command、args和可选env；本应用不自动安装Server，不拼shell命令，Windows拒绝bat/cmd及解析到这类脚本的入口。Windows上的npx常是cmd脚本，因此优先使用已确认的远程HTTP配置或真实可执行入口，不建议为绕过检查套cmd /c。
+
+启动时并发完成初始化与工具发现，每Server总预算30秒；一次调用30秒（不含审批）。工具以 `mcp__<server>__<tool>` 注册并显示真实连接数；失败项隔离，无自动重连/重放或运行中刷新目录。超时/取消后连接可能变为不可用，需重启恢复。文本结果有界回灌，非文本明确省略/不支持，不自动读取资源链接。
+
+外部Server以本地用户权限运行或在远端工作，内置文件围栏和命令黑名单不能约束其内部行为；默认工具审批也不能阻止Server在启动阶段做事。签名key不隔离已获当前用户代码执行权的程序，启动信任不认证程序二进制或远端服务内容。取消/超时不保证远端副作用回滚。本地正常关闭预算5秒，超时强制回收并如实报告无法确认的结果，不是操作系统沙箱或恶意程序资源配额。
+
+离线观察：`uv run python tests/manual_mcp_smoke.py --terminal` 使用临时项目/home、本地stdio或回环HTTP fixture和fake模型，支持restart观察信任/永久工具许可；不读取真实凭据、不收费。默认不带参数只显示说明。`--live`单独要求确认模型费用，工具仍限本地样本；真实生产MCP连接不在这个观察入口中自动发生。

@@ -6,3 +6,6 @@ __pycache__/
 weizhcode.yaml
 .weizhcode/settings.local.yaml
 .weizhcode/.settings.local.*.tmp
+.weizhcode/mcp-trust.local.json
+.weizhcode/mcp-trust.key
+.weizhcode/.mcp-trust.*.tmp
