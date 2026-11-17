@@ -12,6 +12,10 @@ class Tool(Protocol):
     def execute(self, operation: PreparedOperation, context: ToolContext) -> ToolResult: ...
 
 
+class ExternalTool(Tool, Protocol):
+    async def execute_external(self, operation: PreparedOperation, *, cancel, execution_started) -> ToolResult: ...
+
+
 class ToolFailure(Exception):
     def __init__(self, code: str, message: str, **metadata: object) -> None:
         super().__init__(message)

@@ -108,7 +108,7 @@ class ToolDefinition:
     description: str
     parameters: dict[str, object]
     read_only: bool = False
-    execution_kind: Literal["worker", "interactive"] = "worker"
+    execution_kind: Literal["worker", "interactive", "external"] = "worker"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", deepcopy(self.parameters))

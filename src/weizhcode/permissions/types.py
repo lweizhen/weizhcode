@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
+from weizhcode.mcp.contracts import McpToolIdentity
 
 
 class PermissionMode(str, Enum):
@@ -70,6 +71,7 @@ class PermissionTarget:
     match_target: str
     command: str | None = None
     path: PathStamp | None = None
+    external_identity: McpToolIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class Rule:
     is_exact: bool = False
     original: str = ""
     all_targets: bool = False
+    kind: str = "builtin"
 
     def __post_init__(self):
         object.__setattr__(self, "tokens", tuple(tuple(t) for t in self.tokens))
