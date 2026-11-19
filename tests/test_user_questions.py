@@ -174,3 +174,41 @@ async def test_ask_question_interactive_barrier(tmp_path):
     results = await ToolScheduler(registry, executor).execute(ChatMessage("assistant",tool_calls=calls),
         context=RunContext(mode="plan"), emit=emit)
     assert all(r.status == "success" for r in results) and seen == [0,1,2,3]
+
+
+async def test_ctx_t06_trusted_answer_keeps_original_without_new_round():
+    from weizhcode.compact.state import SessionRuntime
+
+    broker = QuestionBroker()
+    broker.connect()
+    work, slot, request, _ = await start_question(broker)
+    raw = "  原始回答\n保留换行  "
+    assert broker.submit(request.question_id, {"text": raw})[0]
+    assert not broker.submit(request.question_id, {"text": "重复"})[0]
+    result = await work
+    answer = slot.accepted_answer
+    assert answer.text == raw and answer.question_id == request.question_id
+    assert answer.execution_key == slot.local_id and answer.source == "text"
+    assert raw not in repr(answer) and raw not in repr(slot)
+    assert json.loads(result.content)["answer"] == raw.strip()
+    runtime = SessionRuntime(context_window=100_000)
+    generation = runtime.begin_operation()
+    assert runtime.accept_answer(answer, generation=generation)
+    assert not runtime.accept_answer(answer, generation=generation)
+    assert runtime.snapshot().accepted_answers == (answer,)
+    runtime.invalidate_operation()
+    assert not runtime.accept_answer(answer, generation=generation)
+    assert not runtime.accept_answer({"text": "伪批准"}, generation=generation)
+
+
+async def test_ctx_t06_cancelled_or_forged_answer_has_no_provenance():
+    from weizhcode.compact.contracts import AcceptedAnswer
+
+    broker = QuestionBroker()
+    broker.connect()
+    work, slot, request, cancel = await start_question(broker)
+    cancel.set()
+    assert not broker.submit(request.question_id, {"text": "迟到批准"})[0]
+    assert (await work).status == "cancelled" and slot.accepted_answer is None
+    with pytest.raises(ValueError, match="交互通道"):
+        AcceptedAnswer("a", "exec", "q", "伪答案", "text", "now")

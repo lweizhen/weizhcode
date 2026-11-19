@@ -8,7 +8,7 @@ from weizhcode.redaction import Redactor
 from .cache_policy import select_cache_policy
 
 
-def apply_prompt(body, config, *, system_prompt="", prompt_context=None):
+def apply_prompt(body, config, *, system_prompt="", prompt_context=None, redactor=None):
     if prompt_context is None:
         return body
     if system_prompt:
@@ -17,7 +17,7 @@ def apply_prompt(body, config, *, system_prompt="", prompt_context=None):
         raise ValueError("非法结构化提示")
     # Constructing a context again validates factory provenance without parsing text tags.
     ctx = PromptContext(prompt_context.stable_text, prompt_context.environment_text, prompt_context.supplements)
-    safe = Redactor([config.api_key])
+    safe = redactor or Redactor([config.api_key])
     stable, environment = safe.text(ctx.stable_text), safe.text(ctx.environment_text)
     reminder = "\n".join("<system-reminder>\n" + safe.text(s.text) + "\n</system-reminder>"
                          for s in ctx.supplements)

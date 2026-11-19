@@ -24,6 +24,27 @@ VALID_PROTOCOLS = {"anthropic", "openai", "qwen"}
 ENV_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
+def _validate_context_window(value: object) -> int:
+    from weizhcode.compact.limits import AUTO_SAFETY_TOKENS, SUMMARY_RESERVE_TOKENS
+
+    minimum = AUTO_SAFETY_TOKENS + SUMMARY_RESERVE_TOKENS
+    if type(value) is not int or (value != 0 and value <= minimum):
+        raise ConfigError("context_window 必须是 0（应用默认）或大于 33000 的整数。")
+    return value
+
+
+def effective_context_window(config: ProviderConfig) -> int:
+    from weizhcode.compact.limits import DEFAULT_CONTEXT_WINDOWS
+
+    value = _validate_context_window(config.context_window)
+    if value:
+        return value
+    try:
+        return DEFAULT_CONTEXT_WINDOWS[config.protocol]
+    except KeyError:
+        raise ConfigError("无法为未知协议确定 context_window 应用默认值。") from None
+
+
 def load_config(path: Path = Path("weizhcode.yaml")) -> AppConfig:
     if not path.exists():
         raise ConfigError(f"配置文件不存在：{path}")
@@ -92,6 +113,8 @@ def _parse_provider(raw: Any, index: int) -> ProviderConfig:
     if not isinstance(thinking, bool):
         raise ConfigError(f"providers[{index}].thinking 必须是 true 或 false。")
 
+    context_window = _validate_context_window(raw.get("context_window", 0))
+
     return ProviderConfig(
         name=name,
         protocol=protocol,
@@ -99,6 +122,7 @@ def _parse_provider(raw: Any, index: int) -> ProviderConfig:
         base_url=base_url,
         api_key=api_key,
         thinking=thinking,
+        context_window=context_window,
     )
 
 

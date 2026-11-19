@@ -5,11 +5,14 @@ from dataclasses import replace
 from contextlib import aclosing
 from collections.abc import AsyncIterator, Callable
 
-from weizhcode.errors import ProviderError, StreamError, redact_secret
+from weizhcode.errors import (ProviderError, ProviderFault, StreamError, classify_provider_fault,
+                             redact_secret, safe_finish_reason)
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
 from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, UsageAccumulator, diagnostic_text, make_call, safe_arguments
 from weizhcode.providers.sse import SSEEvent, stream_sse
 from weizhcode.providers.prompt_adapter import apply_prompt
+from weizhcode.providers.request import (RequestOptions, prepare_body, prompt_identity,
+                                         redact_request_body, request_redactor, stream_options)
 from weizhcode.redaction import Redactor
 
 StreamFunc = Callable[..., AsyncIterator[SSEEvent]]
@@ -20,22 +23,42 @@ class QwenProvider:
         self.config = config
         self._stream = stream_func
 
-    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
-        yield ProviderEvent(type="start")
-        safe = Redactor([self.config.api_key])
+    def prepare_request(self, messages, *, tools=(), system_prompt="", prompt_context=None,
+                        options=RequestOptions(), redactor=None):
+        if options.purpose == "summary":
+            tools = ()
+            if prompt_context is not None:
+                raise ValueError("摘要不能沿用普通Agent提示上下文")
+        safe = request_redactor(self.config, redactor)
         body = {
             "model": self.config.model, "messages": _messages_payload(messages, safe),
-            "stream": True, "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            "stream": True, "max_tokens": options.max_output_tokens,
             "stream_options": {"include_usage": True},
         }
+        history = redact_request_body({'messages': body['messages']}, safe)['messages']
         if system_prompt:
             body["messages"].insert(0, {"role": "system", "content": system_prompt})
         if tools:
             body["tools"] = [{"type": "function", "function": {
                 "name": t.name, "description": t.description, "parameters": t.parameters,
             }} for t in tools]
-            body["tool_choice"] = "auto" if allow_tools else "none"
-        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context)
+            body["tool_choice"] = "auto" if options.allow_tools else "none"
+        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context, redactor=safe)
+        return prepare_body(redact_request_body(body, safe), protocol="qwen", options=options,
+                            fixed_identity=prompt_identity(system_prompt, prompt_context, safe), history_items=history)
+
+    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
+        request = self.prepare_request(messages, tools=tools, system_prompt=system_prompt,
+                                       prompt_context=prompt_context, options=RequestOptions(allow_tools=allow_tools))
+        async with aclosing(self.stream_prepared(request)) as stream:
+            async for event in stream:
+                yield event
+
+    async def stream_prepared(self, request):
+        if request.protocol != "qwen":
+            raise ValueError("已准备请求与Provider协议不一致")
+        body = request.body()
+        yield ProviderEvent(type="start")
         calls = {}
         parts = []
         finish = None
@@ -46,6 +69,7 @@ class QwenProvider:
                 "POST", f"{self.config.base_url}/chat/completions",
                 headers={"content-type": "application/json", "authorization": f"Bearer {self.config.api_key}"},
                 json_body=body,
+                **stream_options(self._stream, "qwen"),
             )
             async with aclosing(source):
                 async for event in source:
@@ -54,7 +78,8 @@ class QwenProvider:
                         break
                     parsed = event.json()
                     if parsed.get("error"):
-                        raise StreamError("通义千问请求失败：" + str(parsed["error"]))
+                        fault = classify_provider_fault("qwen", parsed)
+                        raise StreamError(fault.message, fault=fault)
                     if parsed.get("usage") is not None:
                         yield ProviderEvent("usage", usage=usage.update(parsed["usage"]))
                     choices = parsed.get("choices", [])
@@ -101,9 +126,12 @@ class QwenProvider:
             if usage.seen:
                 yield ProviderEvent("usage", usage=usage.snapshot(complete=True))
             yield ProviderEvent(type="done", assistant_message=ChatMessage(
-                "assistant", "".join(parts), tool_calls=assembled))
+                "assistant", "".join(parts), tool_calls=assembled), finish_reason=safe_finish_reason("qwen", finish))
         except (ProviderError, StreamError, ValueError, TypeError, KeyError, AttributeError) as exc:
-            yield ProviderEvent(type="error", message=redact_secret(str(exc), self.config.api_key))
+            fault = getattr(exc, "fault", None)
+            fault = fault if isinstance(fault, ProviderFault) else ProviderFault("qwen")
+            yield ProviderEvent(type="error", message=redact_secret(str(exc), self.config.api_key),
+                                fault=fault, finish_reason=safe_finish_reason("qwen", finish))
 
 
 def _messages_payload(messages, safe=None):

@@ -14,10 +14,23 @@ class StreamCollector:
         self.provider = provider
         self.redactor = redactor or Redactor()
 
-    async def collect(self, messages, *, tools, system_prompt, context, state, emit, prompt_context=None):
+    async def collect(self, messages, *, tools, system_prompt, context, state, emit, prompt_context=None,
+                      prepared_request=None):
         options = {"prompt_context": prompt_context} if prompt_context is not None else {}
-        stream = self.provider.stream_chat(messages, tools=tools, system_prompt=system_prompt,
-                                           allow_tools=True, **options)
+        if prepared_request is None and callable(getattr(self.provider, "prepare_request", None)):
+            from weizhcode.providers.request import RequestOptions
+            prepared_request = self.provider.prepare_request(messages, tools=tools, system_prompt=system_prompt,
+                options=RequestOptions(), redactor=self.redactor, **options)
+        if prepared_request is not None:
+            if prepared_request.purpose != "chat":
+                raise ValueError("摘要必须使用独立收集器，不能进入普通正文流")
+            state.request_id = prepared_request.request_id
+            state.purpose = prepared_request.purpose
+            stream = self.provider.stream_prepared(prepared_request)
+        else:
+            # 保留既有显式注入的FakeProvider/独立嵌入接口。
+            stream = self.provider.stream_chat(messages, tools=tools, system_prompt=system_prompt,
+                                               allow_tools=True, **options)
         cancelled = asyncio.create_task(context.cancel_event.wait())
         context.owned_tasks.add(cancelled)
         pending = None
@@ -26,7 +39,7 @@ class StreamCollector:
 
         async def send(kind, **kwargs):
             await emit(TurnEvent(kind, run_id=context.run_id, request_id=state.request_id,
-                                 iteration=state.iteration, mode=context.mode, **kwargs))
+                                 iteration=state.iteration, mode=context.mode, request_purpose=state.purpose, **kwargs))
 
         async def text(raw):
             visible = safe_text(redactor.push(raw))
@@ -49,6 +62,10 @@ class StreamCollector:
                     finally:
                         context.owned_tasks.discard(pending)
                 if event is not None:
+                    if event.fault is not None:
+                        state.fault = event.fault
+                    if event.finish_reason:
+                        state.finish_reason = event.finish_reason
                     if event.type == "usage" and event.usage is not None:
                         previous, current = state.usage, event.usage
                         for old, new in ((previous.input_tokens, current.input_tokens),

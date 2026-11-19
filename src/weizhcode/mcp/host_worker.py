@@ -119,8 +119,19 @@ async def main():
                 try:
                     emit("started", request_id=value["request_id"])
                     result = await session.call_tool(value["remote_name"], arguments=value["arguments"])
-                    adapted = adapt_result(call, result, safe)
-                    emit("result", request_id=value["request_id"], result=asdict(adapted))
+                    capture = value.get("capture")
+                    if capture is not None and (not isinstance(capture, dict)
+                            or set(capture) != {"execution_key", "generation"}
+                            or not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", capture.get("execution_key", ""))
+                            or type(capture.get("generation")) is not int):
+                        raise ValueError("MCP_CAPTURE_INVALID")
+                    adapted = adapt_result(call, result, safe, bounded=False)
+                    if capture is not None:
+                        from weizhcode.compact.capture import result_capture_frames
+                        for frame in result_capture_frames(adapted, operation_id=value["request_id"], **capture):
+                            kind = frame.pop("type")
+                            emit(kind, request_id=value["request_id"], **frame)
+                    emit("result", request_id=value["request_id"], result=json.loads(adapted.to_model_text()))
                 except asyncio.CancelledError:
                     raise
                 except Exception:

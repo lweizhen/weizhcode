@@ -302,6 +302,8 @@ class WeizhCodeApp(App[None]):
         self._pending_approval = None
         self._approval_view = None
         self._approval_draft = ""
+        self._compaction_id = None
+        self._compaction_phase = ''
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
@@ -387,6 +389,8 @@ class WeizhCodeApp(App[None]):
                 progress += " · 等待你的回答…"
             elif self._active_tools:
                 progress += " · " + ", ".join(list(self._active_tools.values())[:4])
+            elif self._compaction_id is not None:
+                progress += ' · 上下文压缩：' + self._compaction_phase
             else:
                 progress += " · 等待模型…"
             if self._started_at is not None:
@@ -428,6 +432,13 @@ class WeizhCodeApp(App[None]):
             self._update_status()
             return
         if self.is_generating or self.runner.busy:
+            if content.startswith('/'):
+                await self._append_message('notice', '当前任务尚未结束，命令未排队；草稿已保留。')
+            return
+        from weizhcode.commands import idle_command
+        command = idle_command(content)
+        if command == 'unknown':
+            await self._append_message('notice', '未知命令；可用 /plan、/do、/compact、/exit。')
             return
         if content == "/plan":
             event = self.runner.set_mode("plan")
@@ -436,7 +447,8 @@ class WeizhCodeApp(App[None]):
             await self._consume_event(event)
             return
         text = EXECUTE_DIRECTIVE if content == "/do" else content
-        stream = self.runner.run(text, **({"mode": "normal"} if content == "/do" else {}))
+        stream = (self.runner.compact() if command == 'compact' else
+                  self.runner.run(text, **({"mode": "normal", "application": True} if content == "/do" else {})))
         self._generation += 1
         epoch = self._generation
         self.is_generating = True
@@ -445,8 +457,10 @@ class WeizhCodeApp(App[None]):
         self._iteration = 0
         self._started_at = monotonic()
         self._cancel_requested = False
-        self.query_one(ChatInput).clear_text()
-        await self._append_message("user", self.redactor.display(text))
+        if command != 'compact' or self.query_one(ChatInput).text.strip() == '/compact':
+            self.query_one(ChatInput).clear_text()
+        if command != 'compact':
+            await self._append_message("user", self.redactor.display(text))
         self._update_status()
         self.run_worker(self._stream_reply(stream, epoch), group="agent-loop", exclusive=False)
 
@@ -531,6 +545,22 @@ class WeizhCodeApp(App[None]):
                     self._active_tools[event.local_id] = self.redactor.display(view.call.name) + " " + state
             self._text_view = self._text_key = None
             await self._scroll_to_end()
+        elif event.type == 'compaction' and event.compaction is not None:
+            notice = event.compaction
+            if notice.phase == 'started':
+                self._compaction_id = notice.operation_id
+            if notice.operation_id != self._compaction_id:
+                return
+            self._compaction_phase = notice.phase
+            terminal = notice.phase in {'completed', 'failed', 'cancelled', 'no_reduction', 'skipped', 'tripped'}
+            if terminal:
+                label = {'auto': '自动', 'manual': '手动', 'emergency': '紧急'}[notice.trigger]
+                estimate = (f'（估算 {notice.before_tokens} → {notice.after_tokens} tokens）'
+                            if notice.after_tokens is not None else '')
+                await self._append_message('notice', f'{label}上下文压缩：{notice.phase}{estimate}' +
+                    (f' · {notice.code}' if notice.code else ''))
+                self._compaction_id, self._compaction_phase = None, ''
+            self._text_view = self._text_key = None
         elif event.type == "usage" and event.totals is not None:
             self._totals = event.totals
         elif event.type == "notice":
@@ -540,6 +570,7 @@ class WeizhCodeApp(App[None]):
                 self._text_view.append_text("\n[本次回复未完成]")
             await self.show_error(event.text)
         elif event.type == "turn_done":
+            self._compaction_id, self._compaction_phase = None, ''
             self._clear_approval("审批已结束")
             if self._pending_question is not None and self._question_view is not None:
                 self._question_view.append_text("\n[提问已结束，未收到回答]")

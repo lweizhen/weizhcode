@@ -6,11 +6,14 @@ from copy import deepcopy
 from dataclasses import replace
 from contextlib import aclosing
 
-from weizhcode.errors import ProviderError, StreamError, redact_secret
+from weizhcode.errors import (ProviderError, ProviderFault, StreamError, classify_provider_fault,
+                             redact_secret, safe_finish_reason)
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
 from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, UsageAccumulator, diagnostic_text, make_call
 from weizhcode.providers.sse import SSEEvent, stream_sse
 from weizhcode.providers.prompt_adapter import apply_prompt
+from weizhcode.providers.request import (RequestOptions, prepare_body, prompt_identity,
+                                         redact_request_body, request_redactor, stream_options)
 from weizhcode.redaction import Redactor
 
 StreamFunc = Callable[..., AsyncIterator[SSEEvent]]
@@ -21,16 +24,37 @@ class AnthropicProvider:
         self.config = config
         self._stream = stream_func
 
-    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
-        yield ProviderEvent(type="start")
-        body = {"model": self.config.model, "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
-                "messages": _messages_payload(messages, Redactor([self.config.api_key])), "stream": True}
+    def prepare_request(self, messages, *, tools=(), system_prompt="", prompt_context=None,
+                        options=RequestOptions(), redactor=None):
+        if options.purpose == "summary":
+            tools = ()
+            if prompt_context is not None:
+                raise ValueError("摘要不能沿用普通Agent提示上下文")
+        safe = request_redactor(self.config, redactor)
+        body = {"model": self.config.model, "max_tokens": options.max_output_tokens,
+                "messages": _messages_payload(messages, safe), "stream": True}
+        history = redact_request_body({'messages': body['messages']}, safe)['messages']
         if system_prompt:
             body["system"] = system_prompt
         if tools:
             body["tools"] = [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools]
-            body["tool_choice"] = {"type": "auto"} if allow_tools else {"type": "none"}
-        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context)
+            body["tool_choice"] = {"type": "auto"} if options.allow_tools else {"type": "none"}
+        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context, redactor=safe)
+        return prepare_body(redact_request_body(body, safe), protocol="anthropic", options=options,
+                            fixed_identity=prompt_identity(system_prompt, prompt_context, safe), history_items=history)
+
+    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
+        request = self.prepare_request(messages, tools=tools, system_prompt=system_prompt,
+                                       prompt_context=prompt_context, options=RequestOptions(allow_tools=allow_tools))
+        async with aclosing(self.stream_prepared(request)) as stream:
+            async for event in stream:
+                yield event
+
+    async def stream_prepared(self, request):
+        if request.protocol != "anthropic":
+            raise ValueError("已准备请求与Provider协议不一致")
+        body = request.body()
+        yield ProviderEvent(type="start")
         blocks = {}
         closed = set()
         text_parts = []
@@ -42,6 +66,7 @@ class AnthropicProvider:
                 "POST", f"{self.config.base_url}/messages",
                 headers={"content-type": "application/json", "x-api-key": self.config.api_key,
                          "anthropic-version": "2023-06-01"}, json_body=body,
+                **stream_options(self._stream, "anthropic"),
             )
             async with aclosing(source):
                 async for event in source:
@@ -97,9 +122,11 @@ class AnthropicProvider:
                         complete = True
                         break
                     elif kind == "error":
-                        raise StreamError(_error_message(parsed, "Claude 请求失败"))
+                        fault = classify_provider_fault("anthropic", parsed)
+                        raise StreamError(fault.message, fault=fault)
             if not complete or stop_reason not in {"end_turn", "tool_use", "stop_sequence"}:
-                raise StreamError("Claude 流式回复未完整结束，不执行工具")
+                fault = classify_provider_fault("anthropic", finish_reason=stop_reason)
+                raise StreamError("Claude 流式回复未完整结束，不执行工具", fault=fault)
             if set(blocks) != closed:
                 raise StreamError("Claude 内容块不完整，不执行工具")
             assembled = []
@@ -123,9 +150,12 @@ class AnthropicProvider:
                 yield ProviderEvent("usage", usage=usage.snapshot(complete=True))
             yield ProviderEvent(type="done", assistant_message=ChatMessage(
                 "assistant", "".join(text_parts), tool_calls=tuple(assembled),
-                provider_payload={"anthropic_blocks": replay}))
+                provider_payload={"anthropic_blocks": replay}), finish_reason=safe_finish_reason("anthropic", stop_reason))
         except (ProviderError, StreamError, ValueError, TypeError, KeyError, AttributeError) as exc:
-            yield ProviderEvent(type="error", message=redact_secret(str(exc), self.config.api_key))
+            fault = getattr(exc, "fault", None)
+            fault = fault if isinstance(fault, ProviderFault) else ProviderFault("anthropic")
+            yield ProviderEvent(type="error", message=redact_secret(str(exc), self.config.api_key),
+                                fault=fault, finish_reason=safe_finish_reason("anthropic", stop_reason))
 
 
 def _messages_payload(messages, safe=None):

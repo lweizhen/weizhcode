@@ -4,6 +4,17 @@ from pathlib import Path
 
 import pytest
 
+
+def test_ctx_t62_example_supports_application_window_defaults(tmp_path, monkeypatch):
+    from pathlib import Path
+    from weizhcode.config import load_config, effective_context_window
+    sample = Path(__file__).parents[1] / 'weizhcode.yaml.example'
+    target = tmp_path/'weizhcode.yaml'
+    target.write_bytes(sample.read_bytes())
+    monkeypatch.setenv('OPENAI_API_KEY', 'synthetic-example-key')
+    config = load_config(target)
+    assert [effective_context_window(p) for p in config.providers] == [200000, 128000, 128000]
+
 from weizhcode.config import load_config, resolve_default_provider
 from weizhcode.errors import ConfigError
 
@@ -161,3 +172,30 @@ def test_thinking_must_be_boolean(
 
     with pytest.raises(ConfigError, match="thinking"):
         load_config(path)
+
+
+@pytest.mark.parametrize("protocol,expected", [("anthropic", 200_000), ("openai", 128_000), ("qwen", 128_000)])
+@pytest.mark.parametrize("setting", [None, 0, 33_001, 100_000])
+def test_ctx_t03_window_defaults_and_override(tmp_path, protocol, expected, setting):
+    from weizhcode.config import effective_context_window
+
+    text = valid_config().replace("protocol: openai", f"protocol: {protocol}")
+    text = text.replace("${OPENAI_API_KEY}", "synthetic-test-key")
+    if setting is not None:
+        text += f"    context_window: {setting}\n"
+    provider = resolve_default_provider(load_config(write_config(tmp_path / "sample.yaml", text)))
+    assert provider.context_window == (setting or 0)
+    assert effective_context_window(provider) == (setting or expected)
+
+
+@pytest.mark.parametrize("setting", [True, False, -1, 1, 33_000, "100000", None, 100000.0])
+def test_ctx_t03_invalid_window_is_safe_error(tmp_path, setting):
+    import yaml
+
+    raw = yaml.safe_load(valid_config().replace("${OPENAI_API_KEY}", "synthetic-test-key"))
+    raw["providers"][0]["context_window"] = setting
+    path = tmp_path / "sample.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ConfigError, match="context_window") as caught:
+        load_config(path)
+    assert "synthetic-test-key" not in str(caught.value)

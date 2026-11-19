@@ -15,6 +15,8 @@ from weizhcode.tools.executor import ToolExecutor
 from weizhcode.turn_runner import TurnRunner
 from weizhcode.permissions.engine import PermissionEngine
 from weizhcode.approvals import ApprovalBroker
+from weizhcode.compact.factory import build_context_runtime
+from weizhcode.config import effective_context_window
 
 
 def main() -> None:
@@ -52,11 +54,13 @@ def main() -> None:
                 runner = None
                 try:
                     manager = await bootstrap.start(registry, permissions)
+                    runtime = build_context_runtime(root_identity=permissions.root,
+                        context_window=effective_context_window(provider_config), redactor=bootstrap.redactor)
                     executor = ToolExecutor(registry, ToolContext(root), bootstrap.redactor, permissions=permissions,
-                                            approvals=ApprovalBroker(bootstrap.redactor))
+                                            approvals=ApprovalBroker(bootstrap.redactor), context_runtime=runtime)
                     executor.mcp_manager = manager
                     executor.mcp_notices = bootstrap.notices
-                    runner = TurnRunner(provider, conversation, registry, executor, bootstrap.redactor)
+                    runner = TurnRunner(provider, conversation, registry, executor, bootstrap.redactor, context_runtime=runtime)
                     app = WeizhCodeApp(provider, conversation, runner=runner, redactor=bootstrap.redactor,
                                        provider_name=provider_config.name, model=provider_config.model,
                                        project_path=str(root), version=__version__)
@@ -75,9 +79,11 @@ def main() -> None:
             except Exception:
                 print("MCP应用未正常完成；已尝试清理自有连接，请检查配置与本地进程后重启。")
             return
+    runtime = build_context_runtime(root_identity=permissions.root,
+        context_window=effective_context_window(provider_config), redactor=redactor)
     executor = ToolExecutor(registry, ToolContext(root), redactor, permissions=permissions,
-                            approvals=ApprovalBroker(redactor))
-    runner = TurnRunner(provider, conversation, registry, executor, redactor)
+                            approvals=ApprovalBroker(redactor), context_runtime=runtime)
+    runner = TurnRunner(provider, conversation, registry, executor, redactor, context_runtime=runtime)
     WeizhCodeApp(
         provider,
         conversation,

@@ -13,7 +13,7 @@ from weizhcode.errors import ConfigError
 from weizhcode.config import load_config
 
 
-def test_loop_startup_wiring_new_components_share_dependencies(monkeypatch, tmp_path):
+def test_ctx_t60_ctx_t61_loop_startup_wiring_new_components_share_dependencies(monkeypatch, tmp_path):
     from weizhcode.turn_runner import TurnRunner
     monkeypatch.setattr(cli, "TurnRunner", TurnRunner)
     providers = [ProviderConfig("active", "qwen", "model", "https://example.test", "active-key", False),
@@ -34,6 +34,9 @@ def test_loop_startup_wiring_new_components_share_dependencies(monkeypatch, tmp_
     assert runner.scheduler.registry is runner.registry
     assert runner.redactor.secrets == ("active-key",)
     assert runner.mode == "default" and runner.max_iterations == 25
+    assert runner.context_runtime is runner.executor.context_runtime
+    assert runner.context_manager.runtime is runner.context_runtime
+    assert not (tmp_path/'.weizhcode/sessions').exists()
 
 
 async def test_manual_smoke_scope_rejects_outside_without_worker(tmp_path):

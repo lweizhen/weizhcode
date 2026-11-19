@@ -146,30 +146,34 @@ class McpManager:
                 self.states[name] = ServerStatus(name, "unavailable", code="MCP_TRANSPORT_ERROR")
         return McpStatusSnapshot(tuple(self.states.values()), len(self.tools))
 
-    async def call(self, identity, call, *, cancel, execution_started):
+    async def call(self, identity, call, *, cancel, execution_started, capture_sink=None):
         if identity.server_name in self._busy:
             return ToolResult.failure(call, "MCP_BUSY", "同一MCP连接已有调用，未发送本次请求")
         self._busy.add(identity.server_name)
         self._diagnostic_counts[identity.server_name] = 0
         try:
-            return await self._call(identity, call, cancel=cancel, execution_started=execution_started)
+            return await self._call(identity, call, cancel=cancel, execution_started=execution_started, capture_sink=capture_sink)
         finally:
             self._busy.discard(identity.server_name)
 
-    async def _call(self, identity, call, *, cancel, execution_started):
+    async def _call(self, identity, call, *, cancel, execution_started, capture_sink=None):
         state = self.states.get(identity.server_name)
         if self._close_task or identity != self.identity(call.name) or state is None or state.state != "ready":
             return ToolResult.failure(call, "MCP_UNAVAILABLE", "MCP连接不可用，未自动重连")
         host = self.hosts[identity.server_name]
         request_id = uuid4().hex
         async def operation():
+            capture_started = capture_ended = False
+            capture_seq = 0
             async with asyncio.timeout(self.call_timeout):
                 if cancel.is_set():
                     raise asyncio.CancelledError()
                 execution_started()
                 host.observe_descendants()
                 await host.send("call", request_id=request_id, remote_name=identity.remote_name, full_name=identity.full_name,
-                                call_id=call.call_id, arguments=call.arguments)
+                                call_id=call.call_id, arguments=call.arguments,
+                                **({"capture": {"execution_key": capture_sink.execution_key, "generation": capture_sink.generation}}
+                                   if capture_sink is not None else {}))
                 while True:
                     value = await host.receive()
                     if value["type"] == "diagnostic":
@@ -179,8 +183,34 @@ class McpManager:
                         raise ValueError("MCP_IPC_ID")
                     if value["type"] == "started":
                         continue
+                    kind = value["type"]
+                    if kind in {"capture_begin", "capture_chunk", "capture_end"}:
+                        sink = capture_sink
+                        if (sink is None or capture_ended or value.get("operation_id") != request_id
+                                or value.get("execution_key") != sink.execution_key
+                                or type(value.get('generation')) is not int or value.get("generation") != sink.generation):
+                            raise ValueError("MCP_CAPTURE_ID")
+                        if kind == "capture_begin":
+                            if (capture_started or value.get("call_id") != call.call_id
+                                    or value.get("tool_name") != call.name
+                                    or not await sink.begin(collected_bytes=value.get("collected_bytes"), truncated=value.get("truncated"))):
+                                raise ValueError("MCP_CAPTURE_BEGIN")
+                            capture_started = True
+                        elif kind == "capture_chunk":
+                            if (not capture_started or type(value.get("seq")) is not int
+                                    or value["seq"] != capture_seq or not await sink.feed(value.get("text"))):
+                                raise ValueError("MCP_CAPTURE_CHUNK")
+                            capture_seq += 1
+                        else:
+                            if not capture_started or type(value.get("complete")) is not bool:
+                                raise ValueError("MCP_CAPTURE_END")
+                            await sink.finish(complete=value["complete"])
+                            capture_ended = True
+                        continue
                     if value["type"] != "result":
                         raise ConnectionError()
+                    if capture_sink is not None and not capture_ended:
+                        raise ValueError("MCP_CAPTURE_MISSING")
                     return ToolResult(**value["result"])
         work = asyncio.create_task(operation())
         cancellation = asyncio.create_task(cancel.wait())

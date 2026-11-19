@@ -7,6 +7,9 @@ providers:
     base_url: https://api.anthropic.com/v1
     api_key: ${ANTHROPIC_API_KEY}
     thinking: false
+    # 可选：0使用应用默认（anthropic 200000，openai/qwen 128000），不是模型能力探测。
+    # 显式值必须是大于33000的整数；请按实际服务的窗口填写。
+    context_window: 0
 
   - name: openai-main
     protocol: openai

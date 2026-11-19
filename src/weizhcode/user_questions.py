@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from uuid import uuid4
 
+from weizhcode.compact.contracts import _accepted_answer
 from weizhcode.models import QuestionRequest, ToolResult, TurnEvent
 
 
@@ -65,6 +66,10 @@ class QuestionBroker:
         call = pending.slot.call
         result = ToolResult(call.call_id, call.name, json.dumps(content, ensure_ascii=False))
         # 在唤醒等待者前保存事实，取消不会抹掉已接收答案。
+        pending.slot.accepted_answer = _accepted_answer(
+            pending.slot.local_id, pending.request.question_id,
+            answer["text"] if source == "text" else text, source,
+        )
         pending.slot.result = result
         pending.future.set_result(result)
         return True, "回答已接收"

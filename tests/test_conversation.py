@@ -105,3 +105,48 @@ def test_tool_history_invalid_json_uses_diagnostic():
                            [ToolResult.failure(call, "INVALID_JSON", "invalid")])
     assert all(m.provider_payload["diagnostic"] for m in conv.messages())
 
+
+def test_ctx_t05_revision_cas_and_origin():
+    import pytest
+    from weizhcode.compact.contracts import HistoryEntry
+    from weizhcode.models import ChatMessage
+
+    conv = Conversation()
+    assert conv.snapshot().revision == 0
+    conv.add_user_message("原话")
+    before = conv.snapshot()
+    assert before.entries[0].origin == "human" and before.entries[0].human_seq == 1
+    assert "原话" not in repr(before)
+    conv.add_assistant_message("答复")
+    assert not conv.replace_if_current(before.revision, before.entries)
+    current = conv.snapshot()
+    with pytest.raises(ValueError):
+        conv.replace_if_current(current.revision, None)
+    assert conv.snapshot() == current
+    summary = HistoryEntry("summary-id", current.entries[-1].turn_id, "summary", ChatMessage("user", "摘要资料"))
+    assert conv.replace_if_current(current.revision, (summary,))
+    assert conv.snapshot().revision == current.revision + 1
+    conv.add_user_message("下一条原话")
+    assert conv.snapshot().entries[-1].human_seq == 2
+    assert conv.messages()[0].content == "摘要资料"
+
+
+def test_ctx_t05_snapshot_deep_copy_and_atomic_pair_validation():
+    import pytest
+    from weizhcode.models import ChatMessage, ToolCall, ToolResult
+
+    conv = Conversation()
+    conv.add_user_message("读")
+    call = ToolCall("id", "read_file", "{}")
+    conv.add_tool_exchange(ChatMessage("assistant", tool_calls=(call,), provider_payload={"items": [1]}),
+                           [ToolResult("id", "read_file", "data")])
+    before = conv.snapshot()
+    before.entries[1].message.provider_payload["items"].clear()
+    assert conv.messages()[1].provider_payload["items"] == [1]
+    assert before.entries[1].turn_id == before.entries[2].turn_id == before.entries[0].turn_id
+    for invalid in (before.entries[1:2], before.entries[2:], (before.entries[0], before.entries[2])):
+        with pytest.raises(ValueError, match="工具"):
+            conv.replace_if_current(before.revision, invalid)
+        assert conv.snapshot() == before
+    assert conv.replace_if_current(before.revision, before.entries)
+

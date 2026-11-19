@@ -109,6 +109,13 @@ class ManagedWorker:
         self.partial = {"stdout": "", "stderr": ""}
         self._closed = False
         self._close_task = None
+        self.capture_sink = None
+        self.captured_source = None
+        self.file_read_capture = None
+        self._capture_operation = None
+        self._capture_started = self._capture_ended = False
+        self._capture_seq = 0
+        self._prepared_call = None
 
     async def start(self, context: ToolContext):
         if self._closed:
@@ -169,6 +176,54 @@ class ManagedWorker:
                 raise ToolFailure("INTERNAL_ERROR", "工具工作进程通信格式错误") from None
             if not isinstance(message, dict):
                 raise ToolFailure("INTERNAL_ERROR", "工具工作进程通信类型错误")
+            if message.get("type") == "file_capture":
+                sink = self.capture_sink
+                if (self.purpose != "tools" or expected != "result" or sink is None
+                        or len(raw) > 128*1024 or self.file_read_capture is not None
+                        or self._capture_started or self._prepared_call.name != "read_file"
+                        or message.get("operation_id") != self._capture_operation
+                        or message.get("execution_key") != sink.execution_key
+                        or type(message.get('generation')) is not int or message.get("generation") != sink.generation
+                        or message.get("canonical_path") != self.preview.target
+                        or type(message.get("start_line")) is not int
+                        or message["start_line"] != self._prepared_call.arguments.get("start_line", 1)
+                        or type(message.get("returned_lines")) is not int
+                        or not 0 <= message["returned_lines"] <= self._prepared_call.arguments.get("line_count", 2000)
+                        or not isinstance(message.get("text"), str) or len(message["text"]) > 17500
+                        or type(message.get('bom')) is not bool or message.get('newline') not in {'\n', '\r', '\r\n'}
+                        or type(message.get("truncated")) is not bool):
+                    raise ToolFailure("INTERNAL_ERROR", "文件原文捕获帧无效")
+                from weizhcode.compact.contracts import FileReadCapture
+                from datetime import datetime, timezone
+                self.file_read_capture = FileReadCapture(sink.execution_key, message["canonical_path"],
+                    message["start_line"], message["returned_lines"], sink.hub.redactor.text(message["text"]),
+                    message["truncated"], 0, datetime.now(timezone.utc).isoformat(), message['bom'], message['newline'])
+                continue
+            if message.get("type") in {"capture_begin", "capture_chunk", "capture_end"}:
+                sink = self.capture_sink
+                if (self.purpose != "tools" or expected != "result" or sink is None
+                        or len(raw) > 128*1024 or message.get("operation_id") != self._capture_operation
+                        or message.get("execution_key") != sink.execution_key
+                        or type(message.get('generation')) is not int or message.get("generation") != sink.generation or self._capture_ended):
+                    raise ToolFailure("INTERNAL_ERROR", "捕获帧与当前执行不匹配")
+                kind = message["type"]
+                if kind == "capture_begin":
+                    if (self._capture_started or message.get("call_id") != self._prepared_call.call_id
+                            or message.get("tool_name") != self._prepared_call.name
+                            or not await sink.begin(collected_bytes=message.get("collected_bytes"), truncated=message.get("truncated"))):
+                        raise ToolFailure("INTERNAL_ERROR", "捕获开始帧无效")
+                    self._capture_started = True
+                elif kind == "capture_chunk":
+                    if (not self._capture_started or type(message.get("seq")) is not int
+                            or message["seq"] != self._capture_seq or not await sink.feed(message.get("text"))):
+                        raise ToolFailure("INTERNAL_ERROR", "捕获分片无效")
+                    self._capture_seq += 1
+                else:
+                    if not self._capture_started or type(message.get("complete")) is not bool:
+                        raise ToolFailure("INTERNAL_ERROR", "捕获结束帧无效")
+                    self.captured_source = await sink.finish(complete=message["complete"])
+                    self._capture_ended = True
+                continue
             if message.get("type") == "output":
                 label, text = message.get("label"), message.get("text")
                 if label not in self.partial or not isinstance(text, str):
@@ -190,12 +245,16 @@ class ManagedWorker:
                 continue
             if message.get("type") != expected:
                 raise ToolFailure("INTERNAL_ERROR", "工具工作进程状态不匹配")
+            if expected == "result" and self.capture_sink is not None and not self._capture_ended:
+                raise ToolFailure("INTERNAL_ERROR", "捕获未完整结束")
             return message
         raise ToolFailure("INTERNAL_ERROR", "工具工作进程异常终止")
 
-    async def prepare(self, call: ToolCall, *, permission_stamp=None) -> PreparedOperationPreview:
+    async def prepare(self, call: ToolCall, *, permission_stamp=None, archive_read_proof=None) -> PreparedOperationPreview:
+        self._prepared_call = call
         await self._send({"type": "prepare", "call": asdict(call),
-                          "permission_stamp": asdict(permission_stamp) if permission_stamp else None})
+                          "permission_stamp": asdict(permission_stamp) if permission_stamp else None,
+                          "archive_read_proof": asdict(archive_read_proof) if archive_read_proof else None})
         message = await self._receive("prepared")
         payload = message["preview"]
         if payload.get("error"):
@@ -203,8 +262,11 @@ class ManagedWorker:
         self.preview = PreparedOperationPreview(**payload)
         return self.preview
 
-    async def execute(self, operation_id: str) -> ToolResult:
-        await self._send({"type": "execute", "operation_id": operation_id})
+    async def execute(self, operation_id: str, *, capture_sink=None) -> ToolResult:
+        self.capture_sink, self._capture_operation = capture_sink, operation_id
+        options = ({"capture": {"execution_key": capture_sink.execution_key, "generation": capture_sink.generation}}
+                   if capture_sink is not None else {})
+        await self._send({"type": "execute", "operation_id": operation_id, **options})
         message = await self._receive("result")
         return ToolResult(**message["result"])
 

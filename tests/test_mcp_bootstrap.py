@@ -20,7 +20,7 @@ def test_startup_prompt_authorization_no_tty(tmp_path):
     assert not bootstrap.manager.hosts
 
 
-def test_mcp_bootstrap_cli_same_loop(monkeypatch, tmp_path):
+def test_ctx_t61_mcp_bootstrap_cli_same_loop(monkeypatch, tmp_path):
     from weizhcode import cli
     import weizhcode.bootstrap as module
     from weizhcode.models import AppConfig, ProviderConfig
@@ -45,6 +45,9 @@ def test_mcp_bootstrap_cli_same_loop(monkeypatch, tmp_path):
             runner = captured["runner"]
             assert runner.registry.external_identity("mcp__demo__echo") is not None
             assert runner.executor.mcp_manager.snapshot().servers[0].state == "ready"
+            assert runner.context_runtime is runner.executor.context_runtime
+            assert runner.context_manager.runtime is runner.context_runtime
+            assert runner.context_runtime.store is not None
     monkeypatch.setattr(cli, "WeizhCodeApp", App)
     cli.main()
     manager = captured["runner"].executor.mcp_manager

@@ -98,3 +98,22 @@ def test_totals_coverage_no_double_add():
     assert totals.input_tokens == 150 and totals.request_count == 5
     assert totals.cache_read == CacheCounterTotals(35, 3, 1, 1)
     assert totals.request_count - totals.cache_read.reported_requests - totals.cache_read.not_applicable_requests == 1
+def test_ctx_t16_request_ledger_settles_once_and_separates_purposes():
+    import pytest
+    from weizhcode.models import TokenUsage, UsageCounter
+    from weizhcode.providers.base import RequestUsageLedger
+
+    ledger = RequestUsageLedger()
+    main = TokenUsage(100, 10, True, "openai", UsageCounter(80, "reported"))
+    partial = TokenUsage(40, None, False, "openai")
+    assert ledger.settle("main", main, purpose="chat")
+    assert not ledger.settle("main", main, purpose="chat")
+    assert ledger.settle("summary", partial, purpose="summary", trigger="manual")
+    assert not ledger.settle("summary", TokenUsage(40, 2, True), purpose="summary", trigger="manual")
+    assert ledger.totals.input_tokens == 140 and ledger.totals.output_tokens == 10
+    assert ledger.totals.request_count == 2 and ledger.totals.incomplete_requests == 1
+    assert ledger.by_purpose()["chat"].input_tokens == 100
+    assert ledger.by_purpose()["summary"].input_tokens == 40
+    assert ledger.records()[1].usage.output_tokens is None
+    with pytest.raises(ValueError, match="目的"):
+        ledger.settle("main", main, purpose="summary")

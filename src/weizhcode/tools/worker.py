@@ -4,7 +4,7 @@ import json
 import sys
 import threading
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from weizhcode.models import PreparedOperationPreview, ToolCall, ToolContext, ToolResult
@@ -71,6 +71,11 @@ def main():
                                 raise PermissionFailure("PERMISSION_UNAVAILABLE", "文件操作缺少批准印记")
                             recheck(PathStamp(**message["permission_stamp"]), context.permission_root)
                         operation = tool.prepare(validated, context)
+                        proof = message.get("archive_read_proof")
+                        if proof is not None:
+                            if validated.name != "read_file" or not isinstance(proof, dict):
+                                raise PermissionFailure("ARCHIVE_CHANGED", "归档读取凭据无效")
+                            operation = replace(operation, state={**operation.state, "archive_read_proof": proof})
                         if not operation.error and message.get("permission_stamp") and operation.target != message["permission_stamp"]["canonical_target"]:
                             raise PermissionFailure("PERMISSION_TARGET_CHANGED", "文件准备目标已变化")
                     except PermissionFailure as exc:
@@ -85,8 +90,31 @@ def main():
                 emit({"type": "prepared", "preview": asdict(preview)})
             elif state == "prepared" and kind == "execute" and message.get("operation_id") == operation.operation_id:
                 state = "done"
-                result = registry.get(operation.call.name).execute(operation, context)
-                emit({"type": "result", "result": asdict(result)})
+                capture = message.get("capture")
+                if capture is not None:
+                    if (not isinstance(capture, dict) or set(capture) != {"execution_key", "generation"}
+                            or not isinstance(capture["execution_key"], str)
+                            or not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", capture["execution_key"])
+                            or type(capture["generation"]) is not int or capture["generation"] < 0):
+                        raise ValueError()
+                from weizhcode.compact.capture import worker_file_capture
+                file_capture = {} if capture is not None and operation.call.name == "read_file" else None
+                token = worker_file_capture.set(file_capture)
+                try:
+                    result = registry.get(operation.call.name).execute(operation, context)
+                finally:
+                    worker_file_capture.reset(token)
+                if capture is not None:
+                    if file_capture and not result.is_error:
+                        emit({"type": "file_capture", "operation_id": operation.operation_id,
+                              **capture, **file_capture})
+                    from weizhcode.compact.capture import result_capture_frames
+                    for frame in result_capture_frames(result, operation_id=operation.operation_id, **capture):
+                        if len(json.dumps(frame, ensure_ascii=False).encode()) > 128*1024:
+                            raise ValueError()
+                        emit(frame)
+                # 公开DTO仍有原最终预算；捕获不混入metadata或provider_payload。
+                emit({"type": "result", "result": json.loads(result.to_model_text())})
             else:
                 state = "failed"
                 emit({"type": "error", "message": "非法指令、错误操作 ID 或重复执行"})

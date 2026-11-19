@@ -53,7 +53,9 @@ async def run_app(bootstrap, provider):
     manager = await bootstrap.start(registry, engine)
     executor = SampleExecutor(registry, ToolContext(bootstrap.root), bootstrap.redactor, permissions=engine)
     executor.mcp_manager, executor.mcp_notices = manager, bootstrap.notices
-    runner = TurnRunner(provider, Conversation(), registry, executor, bootstrap.redactor, max_iterations=5)
+    from weizhcode.compact.factory import NoopContextManager
+    options = {'context_manager': NoopContextManager()} if not hasattr(provider, 'prepare_request') else {}
+    runner = TurnRunner(provider, Conversation(), registry, executor, bootstrap.redactor, max_iterations=5, **options)
     try:
         await WeizhCodeApp(provider, runner.conversation, runner=runner, redactor=bootstrap.redactor,
                            provider_name="mcp-smoke", model="fake-local" if isinstance(provider, DemoProvider) else "live-approved",

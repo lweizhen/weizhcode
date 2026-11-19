@@ -7,7 +7,8 @@ from typing import Any
 
 import httpx
 
-from weizhcode.errors import StreamError, redact_secret
+from weizhcode.compact.limits import ERROR_BODY_BYTES
+from weizhcode.errors import ProviderFault, StreamError, classify_provider_fault
 
 
 @dataclass(frozen=True)
@@ -32,8 +33,8 @@ async def stream_sse(
     json_body: dict[str, Any],
     *,
     timeout: float | None = None,
+    protocol: str = "unknown",
 ) -> AsyncIterator[SSEEvent]:
-    secret = _extract_secret(headers)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
@@ -44,18 +45,29 @@ async def stream_sse(
             ) as response:
                 try:
                     response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    body = await response.aread()
-                    detail = body.decode("utf-8", errors="replace")
-                    safe_detail = redact_secret(detail, secret)
-                    raise StreamError(
-                        f"HTTP {exc.response.status_code}：{safe_detail}"
-                    ) from exc
+                except httpx.HTTPStatusError:
+                    payload = await _bounded_error_payload(response)
+                    fault = classify_provider_fault(protocol, payload, http_status=response.status_code)
+                    raise StreamError(f"HTTP {response.status_code}：{fault.message}", fault=fault) from None
 
                 async for event in parse_sse_lines(response.aiter_lines()):
                     yield event
-    except httpx.HTTPError as exc:
-        raise StreamError(redact_secret(f"网络请求失败：{exc}", secret)) from exc
+    except httpx.HTTPError:
+        fault = ProviderFault(protocol, kind="network")
+        raise StreamError(fault.message, fault=fault) from None
+
+
+async def _bounded_error_payload(response):
+    data = bytearray()
+    async for chunk in response.aiter_bytes(chunk_size=4096):
+        if len(data) + len(chunk) > ERROR_BODY_BYTES:
+            return None
+        data.extend(chunk)
+    try:
+        payload = json.loads(data)
+        return payload if isinstance(payload, dict) else None
+    except (ValueError, UnicodeError, RecursionError):
+        return None
 
 
 async def parse_sse_lines(lines: AsyncIterator[str]) -> AsyncIterator[SSEEvent]:

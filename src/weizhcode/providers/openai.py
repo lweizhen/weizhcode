@@ -6,11 +6,14 @@ from copy import deepcopy
 from dataclasses import replace
 from contextlib import aclosing
 
-from weizhcode.errors import ProviderError, StreamError, redact_secret
+from weizhcode.errors import (ProviderError, ProviderFault, StreamError, classify_provider_fault,
+                             redact_secret, safe_finish_reason)
 from weizhcode.models import ChatMessage, ProviderConfig, ProviderEvent
 from weizhcode.providers.base import DEFAULT_MAX_OUTPUT_TOKENS, UsageAccumulator, diagnostic_text, make_call, safe_arguments
 from weizhcode.providers.sse import SSEEvent, stream_sse
 from weizhcode.providers.prompt_adapter import apply_prompt
+from weizhcode.providers.request import (RequestOptions, prepare_body, prompt_identity,
+                                         redact_request_body, request_redactor, stream_options)
 from weizhcode.redaction import Redactor
 
 StreamFunc = Callable[..., AsyncIterator[SSEEvent]]
@@ -21,30 +24,53 @@ class OpenAIProvider:
         self.config = config
         self._stream = stream_func
 
-    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
-        yield ProviderEvent(type="start")
-        body = {"model": self.config.model, "input": _input_payload(messages, Redactor([self.config.api_key])),
-                "stream": True, "store": False, "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+    def prepare_request(self, messages, *, tools=(), system_prompt="", prompt_context=None,
+                        options=RequestOptions(), redactor=None):
+        if options.purpose == "summary":
+            tools = ()
+            if prompt_context is not None:
+                raise ValueError("摘要不能沿用普通Agent提示上下文")
+        safe = request_redactor(self.config, redactor)
+        body = {"model": self.config.model, "input": _input_payload(messages, safe),
+                "stream": True, "store": False, "truncation": "disabled", "max_output_tokens": options.max_output_tokens,
                 "include": ["reasoning.encrypted_content"]}
+        history = redact_request_body({'input': body['input']}, safe)['input']
         if system_prompt:
             body["instructions"] = system_prompt
         if tools:
             body["tools"] = [{"type": "function", "name": t.name, "description": t.description,
                              "parameters": t.parameters, "strict": False} for t in tools]
             body["parallel_tool_calls"] = True
-            body["tool_choice"] = "auto" if allow_tools else "none"
-        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context)
+            body["tool_choice"] = "auto" if options.allow_tools else "none"
+        body = apply_prompt(body, self.config, system_prompt=system_prompt, prompt_context=prompt_context, redactor=safe)
+        return prepare_body(redact_request_body(body, safe), protocol="openai", options=options,
+                            fixed_identity=prompt_identity(system_prompt, prompt_context, safe), history_items=history)
+
+    async def stream_chat(self, messages, *, tools=(), system_prompt="", allow_tools=True, prompt_context=None):
+        request = self.prepare_request(messages, tools=tools, system_prompt=system_prompt,
+                                       prompt_context=prompt_context, options=RequestOptions(allow_tools=allow_tools))
+        async with aclosing(self.stream_prepared(request)) as stream:
+            async for event in stream:
+                yield event
+
+    async def stream_prepared(self, request):
+        if request.protocol != "openai":
+            raise ValueError("已准备请求与Provider协议不一致")
+        body = request.body()
+        yield ProviderEvent(type="start")
         items = {}
         buffers = {}
         local_ids = {}
         parts = []
         completed = None
+        finish = ""
         usage = UsageAccumulator("openai")
         try:
             source = self._stream(
                 "POST", f"{self.config.base_url}/responses",
                 headers={"content-type": "application/json", "authorization": f"Bearer {self.config.api_key}"},
                 json_body=body,
+                **stream_options(self._stream, "openai"),
             )
             async with aclosing(source):
                 async for event in source:
@@ -84,6 +110,7 @@ class OpenAIProvider:
                         items[index] = item
                     elif kind == "response.completed":
                         response = parsed.get("response") or {}
+                        finish = safe_finish_reason("openai", response.get("status"))
                         if response.get("usage") is not None:
                             yield ProviderEvent("usage", usage=usage.update(response["usage"]))
                         if response.get("status") != "completed":
@@ -93,10 +120,17 @@ class OpenAIProvider:
                             raise StreamError("OpenAI 完整输出缺失")
                         break
                     elif kind in {"error", "response.failed", "response.incomplete"}:
-                        raw_usage = (parsed.get("response") or {}).get("usage")
+                        response = parsed.get("response") or {}
+                        if kind != "error":
+                            finish = safe_finish_reason("openai", kind.removeprefix("response."))
+                        details = response.get("incomplete_details")
+                        if isinstance(details, dict):
+                            finish = safe_finish_reason("openai", details.get("reason")) or finish
+                        raw_usage = response.get("usage")
                         if raw_usage is not None:
                             yield ProviderEvent("usage", usage=usage.update(raw_usage))
-                        raise StreamError(_error_message(parsed, "OpenAI 回复失败或被截断"))
+                        fault = classify_provider_fault("openai", parsed)
+                        raise StreamError(fault.message, fault=fault)
             if completed is None:
                 raise StreamError("OpenAI 流式回复未完整结束，不执行工具")
             final_calls = []
@@ -121,9 +155,12 @@ class OpenAIProvider:
                                  if block.get("type") in {"output_text", "refusal"})
             yield ProviderEvent(type="done", assistant_message=ChatMessage(
                 "assistant", final_text if final_text else "".join(parts), tool_calls=tuple(final_calls),
-                provider_payload={"openai_items": completed}))
+                provider_payload={"openai_items": completed}), finish_reason=finish)
         except (ProviderError, StreamError, ValueError, TypeError, KeyError, AttributeError) as exc:
-            yield ProviderEvent(type="error", message=redact_secret(str(exc), self.config.api_key))
+            fault = getattr(exc, "fault", None)
+            fault = fault if isinstance(fault, ProviderFault) else ProviderFault("openai")
+            yield ProviderEvent(type="error", message=redact_secret(str(exc), self.config.api_key),
+                                fault=fault, finish_reason=finish)
 
 
 def _safe_item(item, safe):

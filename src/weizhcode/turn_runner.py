@@ -137,7 +137,7 @@ class TurnRunner:
     def __init__(self, provider, conversation, registry, executor, redactor=None, *,
                  collector=None, scheduler=None, max_iterations=MAX_ITERATIONS,
                  max_unknown_run=MAX_UNKNOWN_RUN, system_prompt=None, questions=None,
-                 environment_collector=None, approvals=None):
+                 environment_collector=None, approvals=None, context_runtime=None, context_manager=None):
         from weizhcode.prompts import SYSTEM_PROMPT
         from weizhcode.stream_collector import StreamCollector
         from weizhcode.tool_scheduler import ToolScheduler
@@ -170,6 +170,23 @@ class TurnRunner:
         self._settled = set()
         self.busy, self._closed = False, False
         self._context = self._channel = self._task = self._close_task = None
+        from weizhcode.compact.factory import build_context_runtime, NoopContextManager
+        from weizhcode.compact.manager import ContextManager
+        if isinstance(context_manager, NoopContextManager):
+            self.context_runtime = None
+        else:
+            runtime = context_runtime or getattr(executor, 'context_runtime', None)
+            if runtime is None:
+                from weizhcode.config import effective_context_window
+                config = getattr(provider, 'config', None)
+                window = effective_context_window(config) if config is not None else 128000
+                runtime = build_context_runtime(root_identity=getattr(permissions, 'root', None),
+                    context_window=window, redactor=self.redactor)
+            self.context_runtime = executor.context_runtime = runtime
+            context_manager = context_manager or ContextManager(runtime, provider, self.redactor)
+        self.context_manager = context_manager
+        from weizhcode.providers.base import RequestUsageLedger
+        self.usage_ledger = RequestUsageLedger()
 
     def set_mode(self, mode):
         if self.busy or self._closed:
@@ -178,7 +195,7 @@ class TurnRunner:
         self.mode = mode
         return TurnEvent("mode_changed", mode=mode, text="计划模式（只读）" if mode == "plan" else "权限模式：" + mode.value)
 
-    def run(self, user_text, *, mode=None):
+    def run(self, user_text, *, mode=None, application=False):
         if self.busy or self._closed:
             async def rejected():
                 yield TurnEvent("notice", reason="busy", text="当前任务尚未结束或应用已退出", mode=self.mode)
@@ -189,7 +206,7 @@ class TurnRunner:
         context = RunContext(mode=self.mode)
         channel = _EventChannel(context, self.redactor)
         self._context, self._channel = context, channel
-        self._task = channel.start(self._drive(user_text, context, channel.emit))
+        self._task = channel.start(self._drive(user_text, context, channel.emit, application=application))
         return _EventStream(channel)
 
     def cancel_current(self):
@@ -197,6 +214,56 @@ class TurnRunner:
             return False
         self._context.cancel_event.set()
         return True
+
+    def compact(self):
+        if self.busy or self._closed:
+            async def rejected():
+                yield TurnEvent('notice', reason='busy', text='当前任务尚未结束，未排队压缩', mode=self.mode)
+            return rejected()
+        self.busy = True
+        context = RunContext(mode=self.mode)
+        channel = _EventChannel(context, self.redactor)
+        self._context, self._channel = context, channel
+        self._task = channel.start(self._drive_compact(context, channel.emit))
+        return _EventStream(channel)
+
+    async def _drive_compact(self, context, emit):
+        from weizhcode.prompting import build_prompt_context, EnvironmentSnapshot
+        runtime, generation = self.context_runtime, None
+        async def send(event):
+            await emit(replace(event, run_id=context.run_id, mode=context.mode))
+        async def settle(request, usage, *, trigger='manual'):
+            if self.usage_ledger.settle(request.request_id, usage, purpose=request.purpose, trigger=trigger):
+                self.usage_totals = self.usage_ledger.totals
+                await send(TurnEvent('usage', request_id=request.request_id, usage=usage, totals=self.usage_totals,
+                    request_purpose='summary', compaction_trigger=trigger))
+        reason = 'completed'
+        try:
+            if runtime is None:
+                await send(TurnEvent('notice', text='当前嵌入会话未启用上下文管理'))
+                return
+            generation = runtime.begin_operation()
+            prompt = build_prompt_context(self.system_prompt, EnvironmentSnapshot(), mode=context.mode,
+                                          iteration=1, redactor=self.redactor)
+            tools = self.registry.definitions_for_mode(context.mode)
+            outcome = await self.context_manager.compact(self.conversation, tools=tools, prompt=prompt,
+                trigger='manual', cancel=context.cancel_event, emit=send, settle=settle,
+                current=lambda: self.mode == context.mode and tools == self.registry.definitions_for_mode(context.mode))
+            reason = outcome.status
+        except asyncio.CancelledError:
+            context.cancel_event.set()
+            reason = 'cancelled'
+        except Exception:
+            reason = 'failed'
+            await send(TurnEvent('notice', text='手动压缩未完成，原对话保留'))
+        finally:
+            try:
+                await send(TurnEvent('turn_done', reason=reason, totals=self.usage_totals))
+            finally:
+                if generation is not None:
+                    runtime.finish_operation(generation)
+                if self._context is context:
+                    self.busy, self._context = False, None
 
     def bind_questions(self):
         return self.questions.connect()
@@ -231,6 +298,8 @@ class TurnRunner:
                 if self._task is not None:
                     await asyncio.gather(self._task, return_exceptions=True)
                 self.questions.close()
+                if self.context_manager is not None:
+                    await self.context_manager.aclose()
                 await self.executor.aclose()
             self._close_task = asyncio.create_task(close())
         await asyncio.shield(self._close_task)
@@ -257,10 +326,18 @@ class TurnRunner:
                           "cleanup_error": self.redactor.display(slot.cleanup_error)})
         message = replace(assistant, content=self.redactor.text(assistant.content),
                           provider_payload={**assistant.provider_payload, "execution_facts": facts})
-        self.conversation.add_tool_exchange(message, results)
+        runtime = self.context_runtime
+        keys = ()
+        if runtime is not None:
+            keys = tuple(slot.source.execution_key if slot.source else f'{context.run_id}:{slot.local_id}' for slot in slots)
+            for slot in slots:
+                answer = slot.accepted_answer
+                if answer is not None and runtime.accept_answer(answer, generation=runtime.operation_generation):
+                    runtime.answer_sequences[answer.answer_id] = self.conversation.reserve_human_sequence()
+        self.conversation.add_tool_exchange(message, results, result_keys=keys)
         context.exchange_committed = True
 
-    async def _drive(self, user_text, context, emit):
+    async def _drive(self, user_text, context, emit, *, application=False):
         from weizhcode import __version__
         from weizhcode.prompting import build_prompt_context, EnvironmentSnapshot
         from weizhcode.prompting.environment import finish_environment
@@ -270,8 +347,23 @@ class TurnRunner:
             await emit(TurnEvent(kind, run_id=context.run_id, request_id=state.request_id if state else "",
                                  iteration=context.iteration, mode=context.mode,
                                  max_iterations=self.max_iterations, **kwargs))
+        async def compact_emit(event):
+            await emit(replace(event, run_id=context.run_id, iteration=context.iteration, mode=context.mode))
+        async def settle(request, usage, *, trigger=''):
+            if self.usage_ledger.settle(request.request_id, usage, purpose=request.purpose, trigger=trigger):
+                self._settled.add(request.request_id)
+                self.usage_totals = self.usage_ledger.totals
+                await emit(TurnEvent('usage', run_id=context.run_id, request_id=request.request_id,
+                    iteration=context.iteration, mode=context.mode, usage=usage, totals=self.usage_totals,
+                    request_purpose=request.purpose, compaction_trigger=trigger))
+        generation = None
         try:
-            self.conversation.add_user_message(user_text)
+            if self.context_runtime is not None:
+                generation = self.context_runtime.begin_operation()
+            if application:
+                self.conversation.add_application_message(user_text)
+            else:
+                self.conversation.add_user_message(user_text)
             root = getattr(getattr(self.executor, "context", None), "project_root", None)
             model = getattr(getattr(self.provider, "config", None), "model", "unavailable")
             snapshot = EnvironmentSnapshot()
@@ -293,16 +385,42 @@ class TurnRunner:
                 context.stream = state
                 prompt = build_prompt_context(self.system_prompt, snapshot, mode=context.mode,
                                               iteration=iteration, redactor=self.redactor)
-                try:
-                    response = await self.collector.collect(self.conversation.messages(),
-                        tools=tools, system_prompt="", prompt_context=prompt,
-                        context=context, state=state, emit=emit)
-                finally:
-                    if state.request_started and state.request_id not in self._settled:
-                        self._settled.add(state.request_id)
-                        self.usage_totals = self.usage_totals.add(state.usage)
-                        await send("usage", usage=state.usage, totals=self.usage_totals)
+                current = lambda: self.mode == context.mode and tools == self.registry.definitions_for_mode(context.mode)
+                from weizhcode.compact.summary import SummaryFailure
+                prepared = None
+                if self.context_runtime is not None:
+                    prepared = await self.context_manager.before_request(self.conversation, tools=tools, prompt=prompt,
+                        cancel=context.cancel_event, emit=compact_emit, settle=settle, current=current)
+                for attempt in range(2):
+                    try:
+                        options = {'prepared_request': prepared} if prepared is not None else {}
+                        response = await self.collector.collect(self.conversation.messages(),
+                            tools=tools, system_prompt="", prompt_context=prompt,
+                            context=context, state=state, emit=emit, **options)
+                    finally:
+                        if state.request_started:
+                            if prepared is not None:
+                                await settle(prepared, state.usage)
+                            elif state.request_id not in self._settled:
+                                self._settled.add(state.request_id)
+                                self.usage_totals = self.usage_totals.add(state.usage)
+                                await send('usage', usage=state.usage, totals=self.usage_totals)
+                    if (response is None and attempt == 0 and self.context_runtime is not None
+                            and not context.cancel_event.is_set() and state.fault is not None
+                            and state.fault.kind == 'context_length'):
+                        outcome = await self.context_manager.compact(self.conversation, tools=tools, prompt=prompt,
+                            trigger='emergency', cancel=context.cancel_event, emit=compact_emit, settle=settle, current=current)
+                        if outcome.status == 'completed':
+                            prepared = self.context_manager.prepare(self.conversation.messages(), tools, prompt)
+                            if not self.context_manager.estimator.fits(prepared):
+                                raise SummaryFailure('CONTEXT_BUDGET_EXCEEDED')
+                            state = StreamState(iteration=iteration)
+                            context.stream = state
+                            continue
+                    break
                 if response is None:
+                    if self.context_runtime is not None:
+                        self.context_runtime.anchor = None
                     if state.completed and state.assistant_message is not None:
                         assistant = state.assistant_message
                     reason = "cancelled" if context.cancel_event.is_set() else "provider_error"
@@ -311,6 +429,9 @@ class TurnRunner:
                         await send("error", text=detail or "模型回复未完整结束", reason=reason)
                     break
                 assistant = response.assistant_message
+                if self.context_runtime is not None:
+                    covered = self.context_manager.prepare(self.conversation.messages()+[assistant], tools, prompt)
+                    self.context_manager.estimator.observe(covered, state.usage, completed=state.completed)
                 if assistant.tool_calls:
                     all_unknown = all(not isinstance(call.name, str) or self.registry.get(call.name) is None
                                       for call in assistant.tool_calls)
@@ -343,8 +464,11 @@ class TurnRunner:
         except asyncio.CancelledError:
             context.cancel_event.set()
             reason, external_cancel = "cancelled", True
-        except Exception:
+        except Exception as exc:
+            from weizhcode.compact.summary import SummaryFailure
             reason, detail = "internal_error", "任务协调失败，已停止；已有修改可能保留"
+            if isinstance(exc, SummaryFailure):
+                reason, detail = 'internal_error', '上下文暂时无法安全容纳请求，已保留历史并停止本轮：' + exc.code
             await send("error", text=detail, reason=reason)
         finally:
             try:
@@ -368,6 +492,8 @@ class TurnRunner:
                 await send("turn_done", reason=reason, totals=self.usage_totals)
             finally:
                 if self._context is context:
+                    if generation is not None:
+                        self.context_runtime.finish_operation(generation)
                     self.busy = False
                     self._context = None
         if external_cancel:

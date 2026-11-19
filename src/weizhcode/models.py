@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from weizhcode.compact.contracts import AcceptedAnswer, CompactionNotice, FileReadCapture, ToolSource
+from weizhcode.errors import ProviderFault
 from weizhcode.permissions.types import PathStamp, PermissionMode, RootIdentity
 
 
@@ -259,6 +261,7 @@ class ProviderConfig:
     base_url: str
     api_key: str
     thinking: bool | None = None
+    context_window: int = 0
 
 
 @dataclass(frozen=True)
@@ -289,6 +292,8 @@ class ProviderEvent:
     tool_call: ToolCall | None = None
     assistant_message: ChatMessage | None = None
     usage: TokenUsage | None = None
+    fault: ProviderFault | None = None
+    finish_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -330,6 +335,9 @@ class TurnEvent:
     totals: UsageTotals | None = None
     question: QuestionRequest | None = None
     approval: ApprovalRequest | None = None
+    compaction: CompactionNotice | None = None
+    request_purpose: str = "chat"
+    compaction_trigger: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_call", deepcopy(self.tool_call))
@@ -345,6 +353,9 @@ class ToolSlot:
     execution_started: bool = False
     result: ToolResult | None = None
     cleanup_error: str = ""
+    source: ToolSource | None = field(default=None, repr=False)
+    file_read: FileReadCapture | None = field(default=None, repr=False)
+    accepted_answer: AcceptedAnswer | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.call = deepcopy(self.call)
@@ -364,6 +375,9 @@ class StreamState:
     error: str = ""
     cancelled: bool = False
     request_started: bool = False
+    fault: ProviderFault | None = None
+    finish_reason: str = ""
+    purpose: str = "chat"
 
 
 @dataclass(frozen=True)

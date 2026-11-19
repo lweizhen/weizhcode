@@ -79,7 +79,7 @@ class OwnedProcess:
             raise ConnectionError("MCP_IPC_ERROR")
         value = json.loads(raw)
         if (type(value) is not dict or value.get("version") != 1 or value.get("host_id") != self.id
-                or value.get("type") not in {"ready", "tool", "discovery_done", "started", "result", "diagnostic", "closed", "fatal", "control_result"}):
+                or value.get("type") not in {"ready", "tool", "discovery_done", "started", "result", "diagnostic", "closed", "fatal", "control_result", "archive_ready", "archive_result", "capture_begin", "capture_chunk", "capture_end"}):
             raise ValueError("MCP_IPC_ERROR")
         return value
 

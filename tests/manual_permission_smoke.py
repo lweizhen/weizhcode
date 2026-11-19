@@ -79,7 +79,9 @@ def make_runner(root, home, provider, *, safe=None, native_demo=False):
     engine = PermissionEngine.load(root, user_home=home)
     registry = create_default_registry()
     executor = SampleExecutor(registry, ToolContext(root), safe, permissions=engine, native_demo=native_demo)
-    return TurnRunner(provider, Conversation(), registry, executor, safe, max_iterations=5)
+    from weizhcode.compact.factory import NoopContextManager
+    options = {'context_manager': NoopContextManager()} if not hasattr(provider, 'prepare_request') else {}
+    return TurnRunner(provider, Conversation(), registry, executor, safe, max_iterations=5, **options)
 
 
 def terminal_observation(*, ask=input):

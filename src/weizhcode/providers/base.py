@@ -1,15 +1,54 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 import json
 from typing import Protocol
 from weizhcode.prompting.contracts import PromptContext
+from weizhcode.providers.request import PreparedRequest, RequestOptions
 
-from weizhcode.models import ChatMessage, ProviderEvent, TokenUsage, UsageCounter, ToolCall, ToolDefinition, parse_tool_arguments
+from weizhcode.models import ChatMessage, ProviderEvent, TokenUsage, UsageCounter, UsageTotals, ToolCall, ToolDefinition, parse_tool_arguments
 
 
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
+
+@dataclass(frozen=True)
+class RequestUsageRecord:
+    request_id: str
+    purpose: str
+    trigger: str
+    usage: TokenUsage = field(repr=False)
+
+
+class RequestUsageLedger:
+    """在请求最终结束时结算累计快照；重复/迟到结算不追加费用。"""
+
+    def __init__(self):
+        self._records = {}
+        self.totals = UsageTotals()
+        self._purposes = {}
+
+    def settle(self, request_id, usage, *, purpose="chat", trigger=""):
+        if not isinstance(request_id, str) or not request_id or not isinstance(usage, TokenUsage):
+            raise ValueError("请求统计身份或用量无效")
+        if purpose not in {"chat", "summary"} or trigger not in {"", "auto", "manual", "emergency"}:
+            raise ValueError("请求统计目的或触发原因无效")
+        existing = self._records.get(request_id)
+        if existing is not None:
+            if existing.purpose != purpose or existing.trigger != trigger:
+                raise ValueError("同一请求身份的统计目的冲突")
+            return False
+        self._records[request_id] = RequestUsageRecord(request_id, purpose, trigger, usage)
+        self.totals = self.totals.add(usage)
+        self._purposes[purpose] = self._purposes.get(purpose, UsageTotals()).add(usage)
+        return True
+
+    def by_purpose(self):
+        return dict(self._purposes)
+
+    def records(self):
+        return tuple(self._records.values())
 
 
 class UsageAccumulator:
@@ -106,6 +145,16 @@ def merge_usage_snapshot(previous: TokenUsage, current: TokenUsage) -> TokenUsag
 
 
 class Provider(Protocol):
+    def prepare_request(
+        self, messages: list[ChatMessage], *, tools: Sequence[ToolDefinition] = (),
+        prompt_context: PromptContext | None = None, options: RequestOptions = RequestOptions(),
+        redactor=None, system_prompt: str = "",
+    ) -> PreparedRequest:
+        ...
+
+    async def stream_prepared(self, request: PreparedRequest) -> AsyncIterator[ProviderEvent]:
+        ...
+
     async def stream_chat(
         self, messages: list[ChatMessage], *, tools: Sequence[ToolDefinition] = (),
         system_prompt: str = "", allow_tools: bool = True, prompt_context: PromptContext | None = None,

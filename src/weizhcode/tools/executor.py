@@ -16,7 +16,7 @@ from weizhcode.permissions.types import ApprovalChoice, Decision, PermissionFail
 class ToolExecutor:
     def __init__(self, registry, context: ToolContext, redactor: Redactor | None = None, *,
                  timeout=TOOL_TIMEOUT_SECONDS, worker_factory=ManagedWorker, questions=None,
-                 permissions=None, approvals=None):
+                 permissions=None, approvals=None, context_runtime=None):
         self.registry, self.context = registry, context
         self.redactor = redactor or Redactor()
         self.timeout, self.worker_factory = timeout, worker_factory
@@ -24,6 +24,7 @@ class ToolExecutor:
         self._closed = False
         self.questions = questions
         self.permissions, self.approvals = permissions, approvals
+        self.context_runtime = context_runtime
 
     async def execute(self, slot, *, mode, cancel, emit, run_id=""):
         mode = normalize_runtime_mode(mode)
@@ -112,6 +113,21 @@ class ToolExecutor:
                 self.permissions.forget(checked)
             if slot.result is not None:
                 slot.phase = "finished"
+        hub = getattr(self.context_runtime, "sources", None)
+        sink = None
+        if hub is not None:
+            sink = await hub.reserve(f"{run_id or 'local'}:{slot.local_id}",
+                                     generation=self.context_runtime.operation_generation)
+            if sink is None:
+                slot.phase = "finished"
+                return save(ToolResult.failure(call, "CONTEXT_CAPTURE_LIMIT", "上下文原文捕获额度不足，未执行工具"))
+
+        async def finish_capture():
+            if sink is not None and not sink.closed:
+                slot.source = await sink.abort(keep_partial=slot.execution_started)
+            elif sink is not None and slot.source is None:
+                slot.source = hub.get(sink.execution_key)
+
         try:
             if self.registry.get(call.name).definition.execution_kind == "external":
                 slot.phase = "preparing"
@@ -119,19 +135,33 @@ class ToolExecutor:
                 tool = self.registry.get(call.name)
                 operation = tool.prepare(call, self.context)
                 if operation.error:
+                    await finish_capture()
+                    slot.phase = "finished"
                     return save(operation.error)
                 if cancel.is_set():
+                    await finish_capture()
+                    slot.phase = "finished"
                     return save(cancelled_result())
                 slot.phase = "running"
                 await emit(TurnEvent("tool_running", local_id=slot.local_id, index=slot.index))
                 def started():
                     slot.execution_started = True
                 try:
-                    return save(await tool.execute_external(operation, cancel=cancel, execution_started=started))
+                    options = {"capture_sink": sink} if sink is not None else {}
+                    result = await tool.execute_external(operation, cancel=cancel, execution_started=started, **options)
+                    if sink is not None:
+                        slot.source = hub.get(sink.execution_key)
+                    return save(result)
                 finally:
+                    await finish_capture()
                     slot.phase = "finished"
             worker = self.worker_factory()
+        except asyncio.CancelledError:
+            await finish_capture()
+            slot.phase = 'finished'
+            raise
         except Exception as exc:
+            await finish_capture()
             slot.cleanup_error = "INTERNAL_ERROR：工具执行器初始化失败，任务已停止"
             slot.phase = "finished"
             return save(failure(call, exc))
@@ -146,7 +176,12 @@ class ToolExecutor:
                     return
                 await worker.start(replace(self.context, permission_root=self.permissions.root))
                 if checked.target.path is not None:
-                    preview = await worker.prepare(call, permission_stamp=checked.target.path)
+                    store = getattr(self.context_runtime, "store", None)
+                    proof = ((store.proof_for_registered_path(checked.target.path.canonical_target)
+                              or store.proof_for_registered_path(checked.target.path.original))
+                             if store is not None and call.name == "read_file" else None)
+                    options = {"archive_read_proof": proof} if proof is not None else {}
+                    preview = await worker.prepare(call, permission_stamp=checked.target.path, **options)
                 else:
                     preview = await worker.prepare(call)
                 if preview.error:
@@ -162,7 +197,12 @@ class ToolExecutor:
                 if cancel.is_set():
                     return
                 slot.execution_started = True
-                result = await worker.execute(preview.operation_id)
+                options = {"capture_sink": sink} if sink is not None else {}
+                result = await worker.execute(preview.operation_id, **options)
+                slot.source = getattr(worker, "captured_source", None)
+                slot.file_read = getattr(worker, "file_read_capture", None)
+                if slot.file_read is not None and not result.is_error:
+                    self.context_runtime.accept_file_read(slot.file_read, generation=sink.generation)
                 # 必须在任何后续 await（尤其清理）之前保存已确认结果。
                 save(result)
 
@@ -194,7 +234,10 @@ class ToolExecutor:
                     task.cancel()
             async def finish_owned():
                 await asyncio.gather(work, cancelled, return_exceptions=True)
-                await worker.aclose()
+                try:
+                    await worker.aclose()
+                finally:
+                    await finish_capture()
             cleanup = asyncio.create_task(finish_owned())
             try:
                 while not cleanup.done():

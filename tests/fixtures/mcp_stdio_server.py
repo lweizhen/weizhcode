@@ -68,6 +68,8 @@ def respond(message):
             text = json.dumps([os.getpid(), *(p.pid for p in children)])
         if text == "slow":
             time.sleep(60)
+        if text == 'large' and '--context-large' in sys.argv:
+            text = 'x'*80000
         result = {"content": [{"type": "text", "text": text}], "isError": text == "error"}
     else:
         return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "Unsupported"}}

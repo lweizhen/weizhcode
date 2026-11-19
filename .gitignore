@@ -9,3 +9,4 @@ weizhcode.yaml
 .weizhcode/mcp-trust.local.json
 .weizhcode/mcp-trust.key
 .weizhcode/.mcp-trust.*.tmp
+.weizhcode/sessions/
